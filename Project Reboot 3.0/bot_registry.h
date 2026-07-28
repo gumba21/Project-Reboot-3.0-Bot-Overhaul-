@@ -3,6 +3,7 @@
 #include "UObjectArray.h"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -46,6 +47,68 @@ enum class EBotCleanupStartResult : uint8
 	AlreadyPending,
 	AlreadyRemoved,
 	NotFound,
+};
+
+enum class EBotStressPhase : uint8
+{
+	Inactive,
+	Spawning,
+	Spawned,
+	Killing,
+	Killed,
+	Cleaning,
+	Cleaned,
+};
+
+enum class EBotLifecycleDiagnosticStage : uint8
+{
+	None,
+	DamageApplication,
+	DeathNotificationHook,
+	DelayedDeathCallback,
+	OriginalDeathHandler,
+	PracticeBypass,
+	TimerCancellation,
+	Unpossess,
+	InventoryDestruction,
+	PawnDestruction,
+	ControllerDestruction,
+	PlayerStateHandling,
+	RegistryRemoval,
+	TombstoneCreation,
+	TombstoneRemoval,
+	InvalidBotSweep,
+};
+
+struct FBotStressFeatureFlags
+{
+	// Practice bots bypass the original Fortnite handler by default. Turning
+	// this on is diagnostic-only and may re-enable the engine's legacy path.
+	bool bOriginalFortniteDeathHandler = false;
+	bool bUnpossess = true;
+	bool bPawnDestruction = true;
+	bool bControllerDestruction = true;
+	bool bPlayerStateCleanup = true;
+	bool bRegistryRemoval = true;
+	bool bInvalidBotSweeping = true;
+};
+
+struct FBotStressDiagnosticSnapshot
+{
+	bool bActive = false;
+	bool bHeartbeatTicking = false;
+	uint64 HeartbeatNumber = 0;
+	EBotStressPhase Phase = EBotStressPhase::Inactive;
+	EBotLifecycleDiagnosticStage LastEnteredStage = EBotLifecycleDiagnosticStage::None;
+	EBotLifecycleDiagnosticStage LastCompletedStage = EBotLifecycleDiagnosticStage::None;
+	uint64 LastEnteredBotId = 0;
+	uint64 LastCompletedBotId = 0;
+	size_t CachedRegistryCount = 0;
+	int RequestedCount = 0;
+	int SpawnedCount = 0;
+	int KillRequests = 0;
+	int CleanupRequests = 0;
+	double AgeSeconds = 0.0;
 };
 
 // A raw UObject address is not enough: Unreal may recycle the same object slot.
@@ -118,8 +181,10 @@ public:
 	bool MarkAliveTrackingAdded(uint64 BotId);
 	bool MarkAliveTrackingRemoved(AController* Controller);
 	EBotCleanupStartResult BeginCleanup(uint64 BotId);
+	bool RestoreAfterDiagnosticCleanup(uint64 BotId);
 	bool WasRemoved(uint64 BotId) const;
 	bool RemoveEntry(uint64 BotId);
+	void ClearRetiredControllerTombstones(const char* Reason, bool bLog = true);
 	std::vector<uint64> CollectInvalidAliveBotIds();
 	void InvalidateAndClear(const char* Reason, bool bLog = true);
 
@@ -140,7 +205,26 @@ namespace Bots
 
 	const char* BotTypeToString(EPlayerBotType Type);
 	const char* BotStateToString(EPlayerBotLifecycleState State);
+	const char* BotStressPhaseToString(EBotStressPhase Phase);
+	const char* BotLifecycleDiagnosticStageToString(EBotLifecycleDiagnosticStage Stage);
 	bool TryParseBotType(const std::string& Value, EPlayerBotType& OutType);
+
+	void BeginBotStressSession(int RequestedCount);
+	void RecordBotStressSpawn(uint64 BotId);
+	void SetBotStressPhase(EBotStressPhase Phase);
+	void RecordBotStressKillRequest();
+	void RecordBotStressCleanupRequest();
+	std::vector<uint64> GetBotStressIds();
+	bool IsRecordedBotStressId(uint64 BotId);
+	FBotStressDiagnosticSnapshot GetBotStressDiagnosticSnapshot();
+	void ResetBotStressDiagnostics();
+	void TickBotStressHeartbeat();
+	bool ShouldRunInvalidBotSweep(bool bFromNetworkTick);
+	void UpdateStressRegistryCount(size_t Count);
+	void EnterLifecycleDiagnosticStage(uint64 BotId, EBotLifecycleDiagnosticStage Stage);
+	void CompleteLifecycleDiagnosticStage(uint64 BotId, EBotLifecycleDiagnosticStage Stage);
+	FBotStressFeatureFlags GetBotStressFeatureFlags();
+	bool SetBotStressFeatureFlag(const std::string& Name, bool bEnabled);
 
 	bool AddBotToAlivePlayerTracking(uint64 BotId);
 	bool ShouldRemoveFromAlivePlayersOnDeath(AController* Controller);

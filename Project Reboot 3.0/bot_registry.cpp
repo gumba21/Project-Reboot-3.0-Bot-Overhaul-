@@ -14,6 +14,31 @@
 #include <algorithm>
 #include <cctype>
 
+namespace
+{
+	struct FBotStressDiagnosticState
+	{
+		bool bActive = false;
+		uint64 HeartbeatNumber = 0;
+		EBotStressPhase Phase = EBotStressPhase::Inactive;
+		EBotLifecycleDiagnosticStage LastEnteredStage = EBotLifecycleDiagnosticStage::None;
+		EBotLifecycleDiagnosticStage LastCompletedStage = EBotLifecycleDiagnosticStage::None;
+		uint64 LastEnteredBotId = 0;
+		uint64 LastCompletedBotId = 0;
+		size_t CachedRegistryCount = 0;
+		int RequestedCount = 0;
+		int KillRequests = 0;
+		int CleanupRequests = 0;
+		std::chrono::steady_clock::time_point StartTime;
+		std::chrono::steady_clock::time_point LastHeartbeatTime;
+		std::chrono::steady_clock::time_point LastInvalidSweepTime;
+		std::vector<uint64> BotIds;
+	};
+
+	FBotStressDiagnosticState StressDiagnostics;
+	FBotStressFeatureFlags StressFeatureFlags;
+}
+
 FSafeBotObjectReference FSafeBotObjectReference::Capture(UObject* InObject)
 {
 	FSafeBotObjectReference Result;
@@ -113,6 +138,7 @@ uint64 FPlayerBotRegistry::RegisterBot(EPlayerBotType Type, AController* Control
 
 	const auto BotId = Entry.BotId;
 	Entries.push_back(std::move(Entry));
+	Bots::UpdateStressRegistryCount(Entries.size());
 
 	LOG_INFO(LogBots, "[BotRegistry] Inserted bot {} type={} name={}.",
 		BotId, Bots::BotTypeToString(Type), DisplayName);
@@ -255,6 +281,19 @@ EBotCleanupStartResult FPlayerBotRegistry::BeginCleanup(uint64 BotId)
 	return EBotCleanupStartResult::Started;
 }
 
+bool FPlayerBotRegistry::RestoreAfterDiagnosticCleanup(uint64 BotId)
+{
+	auto It = FindIterator(BotId);
+
+	if (It == Entries.end() || It->State != EPlayerBotLifecycleState::PendingCleanup)
+		return false;
+
+	It->State = It->bDeathNotificationHandled
+		? EPlayerBotLifecycleState::Dead
+		: EPlayerBotLifecycleState::Alive;
+	return true;
+}
+
 bool FPlayerBotRegistry::WasRemoved(uint64 BotId) const
 {
 	return RemovedBotIds.contains(BotId);
@@ -268,7 +307,12 @@ bool FPlayerBotRegistry::RemoveEntry(uint64 BotId)
 		return false;
 
 	It->State = EPlayerBotLifecycleState::Removed;
+	Bots::EnterLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::TombstoneCreation);
+	LOG_INFO(LogBots, "[BotLifecycle] Tombstone creation entry bot={}.", BotId);
 	RetiredControllerIds.push_back({ BotId, It->Controller });
+	LOG_INFO(LogBots, "[BotLifecycle] Tombstone creation exit bot={} retainedControllers={}.",
+		BotId, RetiredControllerIds.size());
+	Bots::CompleteLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::TombstoneCreation);
 	It->Controller.Reset();
 	It->Pawn.Reset();
 	It->PlayerState.Reset();
@@ -278,7 +322,26 @@ bool FPlayerBotRegistry::RemoveEntry(uint64 BotId)
 	Entries.erase(std::remove_if(Entries.begin(), Entries.end(), [BotId](const FPlayerBotRegistryEntry& Entry) {
 		return Entry.BotId == BotId;
 	}), Entries.end());
+	Bots::UpdateStressRegistryCount(Entries.size());
 	return true;
+}
+
+void FPlayerBotRegistry::ClearRetiredControllerTombstones(const char* Reason, bool bLog)
+{
+	if (bLog)
+	{
+		Bots::EnterLifecycleDiagnosticStage(0, EBotLifecycleDiagnosticStage::TombstoneRemoval);
+		LOG_INFO(LogBots, "[BotLifecycle] Tombstone removal entry reason={} count={}.",
+			Reason, RetiredControllerIds.size());
+	}
+
+	RetiredControllerIds.clear();
+
+	if (bLog)
+	{
+		LOG_INFO(LogBots, "[BotLifecycle] Tombstone removal exit reason={} count=0.", Reason);
+		Bots::CompleteLifecycleDiagnosticStage(0, EBotLifecycleDiagnosticStage::TombstoneRemoval);
+	}
 }
 
 std::vector<uint64> FPlayerBotRegistry::CollectInvalidAliveBotIds()
@@ -326,6 +389,13 @@ void FPlayerBotRegistry::InvalidateAndClear(const char* Reason, bool bLog)
 		LOG_INFO(LogBots, "[BotLifecycle] Invalidating {} registry entries during {}.", Entries.size(), Reason);
 	}
 
+	if (bLog)
+	{
+		Bots::EnterLifecycleDiagnosticStage(0, EBotLifecycleDiagnosticStage::TombstoneCreation);
+		LOG_INFO(LogBots, "[BotLifecycle] Tombstone creation entry reason={} count={}.",
+			Reason, Entries.size());
+	}
+
 	for (auto& Entry : Entries)
 	{
 		Entry.State = EPlayerBotLifecycleState::Removed;
@@ -337,7 +407,14 @@ void FPlayerBotRegistry::InvalidateAndClear(const char* Reason, bool bLog)
 		RemovedBotIds.insert(Entry.BotId);
 	}
 
+	if (bLog)
+	{
+		LOG_INFO(LogBots, "[BotLifecycle] Tombstone creation exit reason={} retainedControllers={}.",
+			Reason, RetiredControllerIds.size());
+		Bots::CompleteLifecycleDiagnosticStage(0, EBotLifecycleDiagnosticStage::TombstoneCreation);
+	}
 	Entries.clear();
+	Bots::UpdateStressRegistryCount(0);
 }
 
 namespace
@@ -442,6 +519,263 @@ namespace Bots
 		}
 	}
 
+	const char* BotStressPhaseToString(EBotStressPhase Phase)
+	{
+		switch (Phase)
+		{
+		case EBotStressPhase::Spawning:
+			return "Spawning";
+		case EBotStressPhase::Spawned:
+			return "Spawned";
+		case EBotStressPhase::Killing:
+			return "Killing";
+		case EBotStressPhase::Killed:
+			return "Killed";
+		case EBotStressPhase::Cleaning:
+			return "Cleaning";
+		case EBotStressPhase::Cleaned:
+			return "Cleaned";
+		case EBotStressPhase::Inactive:
+		default:
+			return "Inactive";
+		}
+	}
+
+	const char* BotLifecycleDiagnosticStageToString(EBotLifecycleDiagnosticStage Stage)
+	{
+		switch (Stage)
+		{
+		case EBotLifecycleDiagnosticStage::DamageApplication:
+			return "DamageApplication";
+		case EBotLifecycleDiagnosticStage::DeathNotificationHook:
+			return "DeathNotificationHook";
+		case EBotLifecycleDiagnosticStage::DelayedDeathCallback:
+			return "DelayedDeathCallback";
+		case EBotLifecycleDiagnosticStage::OriginalDeathHandler:
+			return "OriginalDeathHandler";
+		case EBotLifecycleDiagnosticStage::PracticeBypass:
+			return "PracticeBypass";
+		case EBotLifecycleDiagnosticStage::TimerCancellation:
+			return "TimerCancellation";
+		case EBotLifecycleDiagnosticStage::Unpossess:
+			return "Unpossess";
+		case EBotLifecycleDiagnosticStage::InventoryDestruction:
+			return "InventoryDestruction";
+		case EBotLifecycleDiagnosticStage::PawnDestruction:
+			return "PawnDestruction";
+		case EBotLifecycleDiagnosticStage::ControllerDestruction:
+			return "ControllerDestruction";
+		case EBotLifecycleDiagnosticStage::PlayerStateHandling:
+			return "PlayerStateHandling";
+		case EBotLifecycleDiagnosticStage::RegistryRemoval:
+			return "RegistryRemoval";
+		case EBotLifecycleDiagnosticStage::TombstoneCreation:
+			return "TombstoneCreation";
+		case EBotLifecycleDiagnosticStage::TombstoneRemoval:
+			return "TombstoneRemoval";
+		case EBotLifecycleDiagnosticStage::InvalidBotSweep:
+			return "InvalidBotSweep";
+		case EBotLifecycleDiagnosticStage::None:
+		default:
+			return "None";
+		}
+	}
+
+	void BeginBotStressSession(int RequestedCount)
+	{
+		const size_t RegistryCount = StressDiagnostics.CachedRegistryCount;
+		StressDiagnostics = {};
+		StressDiagnostics.bActive = true;
+		StressDiagnostics.Phase = EBotStressPhase::Spawning;
+		StressDiagnostics.RequestedCount = RequestedCount;
+		StressDiagnostics.CachedRegistryCount = RegistryCount;
+		StressDiagnostics.StartTime = std::chrono::steady_clock::now();
+		StressDiagnostics.LastHeartbeatTime = StressDiagnostics.StartTime;
+		StressDiagnostics.LastInvalidSweepTime = StressDiagnostics.StartTime;
+
+		LOG_INFO(LogBots,
+			"[BotStress] Isolated stress session started requested={} heartbeat=game-thread primitive-only.",
+			RequestedCount);
+	}
+
+	void RecordBotStressSpawn(uint64 BotId)
+	{
+		if (!StressDiagnostics.bActive)
+			return;
+
+		StressDiagnostics.BotIds.push_back(BotId);
+	}
+
+	void SetBotStressPhase(EBotStressPhase Phase)
+	{
+		if (!StressDiagnostics.bActive && Phase != EBotStressPhase::Inactive)
+			return;
+
+		StressDiagnostics.Phase = Phase;
+		LOG_INFO(LogBots, "[BotStress] Phase changed to {}.", BotStressPhaseToString(Phase));
+	}
+
+	void RecordBotStressKillRequest()
+	{
+		if (StressDiagnostics.bActive)
+			++StressDiagnostics.KillRequests;
+	}
+
+	void RecordBotStressCleanupRequest()
+	{
+		if (StressDiagnostics.bActive)
+			++StressDiagnostics.CleanupRequests;
+	}
+
+	std::vector<uint64> GetBotStressIds()
+	{
+		return StressDiagnostics.BotIds;
+	}
+
+	bool IsRecordedBotStressId(uint64 BotId)
+	{
+		return StressDiagnostics.bActive &&
+			std::find(StressDiagnostics.BotIds.begin(), StressDiagnostics.BotIds.end(), BotId) !=
+				StressDiagnostics.BotIds.end();
+	}
+
+	FBotStressDiagnosticSnapshot GetBotStressDiagnosticSnapshot()
+	{
+		FBotStressDiagnosticSnapshot Snapshot;
+		Snapshot.bActive = StressDiagnostics.bActive;
+		Snapshot.HeartbeatNumber = StressDiagnostics.HeartbeatNumber;
+		Snapshot.Phase = StressDiagnostics.Phase;
+		Snapshot.LastEnteredStage = StressDiagnostics.LastEnteredStage;
+		Snapshot.LastCompletedStage = StressDiagnostics.LastCompletedStage;
+		Snapshot.LastEnteredBotId = StressDiagnostics.LastEnteredBotId;
+		Snapshot.LastCompletedBotId = StressDiagnostics.LastCompletedBotId;
+		Snapshot.CachedRegistryCount = StressDiagnostics.CachedRegistryCount;
+		Snapshot.RequestedCount = StressDiagnostics.RequestedCount;
+		Snapshot.SpawnedCount = (int)StressDiagnostics.BotIds.size();
+		Snapshot.KillRequests = StressDiagnostics.KillRequests;
+		Snapshot.CleanupRequests = StressDiagnostics.CleanupRequests;
+
+		if (StressDiagnostics.bActive)
+		{
+			const auto Now = std::chrono::steady_clock::now();
+			Snapshot.AgeSeconds = std::chrono::duration<double>(
+				Now - StressDiagnostics.StartTime).count();
+			Snapshot.bHeartbeatTicking =
+				StressDiagnostics.HeartbeatNumber > 0 &&
+				std::chrono::duration<double>(Now - StressDiagnostics.LastHeartbeatTime).count() < 2.5;
+		}
+
+		return Snapshot;
+	}
+
+	void ResetBotStressDiagnostics()
+	{
+		const size_t RegistryCount = StressDiagnostics.CachedRegistryCount;
+		StressDiagnostics = {};
+		StressDiagnostics.CachedRegistryCount = RegistryCount;
+	}
+
+	void TickBotStressHeartbeat()
+	{
+		if (!StressDiagnostics.bActive)
+			return;
+
+		const auto Now = std::chrono::steady_clock::now();
+
+		if (std::chrono::duration<double>(Now - StressDiagnostics.LastHeartbeatTime).count() < 1.0)
+			return;
+
+		StressDiagnostics.LastHeartbeatTime = Now;
+		++StressDiagnostics.HeartbeatNumber;
+
+		// This log deliberately reads only cached primitive diagnostic state.
+		// UObject references, registry vectors, and object arrays are not touched.
+		LOG_INFO(LogBots,
+			"[BotStress] Heartbeat={} phase={} lastEntered={} bot={} lastCompleted={} bot={} registryCount={}.",
+			StressDiagnostics.HeartbeatNumber,
+			BotStressPhaseToString(StressDiagnostics.Phase),
+			BotLifecycleDiagnosticStageToString(StressDiagnostics.LastEnteredStage),
+			StressDiagnostics.LastEnteredBotId,
+			BotLifecycleDiagnosticStageToString(StressDiagnostics.LastCompletedStage),
+			StressDiagnostics.LastCompletedBotId,
+			StressDiagnostics.CachedRegistryCount);
+	}
+
+	bool ShouldRunInvalidBotSweep(bool bFromNetworkTick)
+	{
+		if (!StressFeatureFlags.bInvalidBotSweeping)
+			return false;
+
+		if (!StressDiagnostics.bActive || !bFromNetworkTick)
+			return true;
+
+		const auto Now = std::chrono::steady_clock::now();
+
+		// During an isolated stress session the sweep is intentionally reduced
+		// to 1 Hz. This prevents a diagnostic scan from overwriting the last
+		// lifecycle stage every frame and makes a sweep stall identifiable.
+		if (std::chrono::duration<double>(Now - StressDiagnostics.LastInvalidSweepTime).count() < 1.0)
+			return false;
+
+		StressDiagnostics.LastInvalidSweepTime = Now;
+		return true;
+	}
+
+	void UpdateStressRegistryCount(size_t Count)
+	{
+		StressDiagnostics.CachedRegistryCount = Count;
+	}
+
+	void EnterLifecycleDiagnosticStage(uint64 BotId, EBotLifecycleDiagnosticStage Stage)
+	{
+		StressDiagnostics.LastEnteredStage = Stage;
+		StressDiagnostics.LastEnteredBotId = BotId;
+		LOG_INFO(LogBots, "[BotLifecycle] Stage entry bot={} stage={}.",
+			BotId, BotLifecycleDiagnosticStageToString(Stage));
+	}
+
+	void CompleteLifecycleDiagnosticStage(uint64 BotId, EBotLifecycleDiagnosticStage Stage)
+	{
+		StressDiagnostics.LastCompletedStage = Stage;
+		StressDiagnostics.LastCompletedBotId = BotId;
+		LOG_INFO(LogBots, "[BotLifecycle] Stage exit bot={} stage={}.",
+			BotId, BotLifecycleDiagnosticStageToString(Stage));
+	}
+
+	FBotStressFeatureFlags GetBotStressFeatureFlags()
+	{
+		return StressFeatureFlags;
+	}
+
+	bool SetBotStressFeatureFlag(const std::string& Name, bool bEnabled)
+	{
+		std::string LowerName = Name;
+		std::transform(LowerName.begin(), LowerName.end(), LowerName.begin(), [](unsigned char Character) {
+			return (char)std::tolower(Character);
+		});
+
+		if (LowerName == "originalhandler")
+			StressFeatureFlags.bOriginalFortniteDeathHandler = bEnabled;
+		else if (LowerName == "unpossess")
+			StressFeatureFlags.bUnpossess = bEnabled;
+		else if (LowerName == "pawndestroy")
+			StressFeatureFlags.bPawnDestruction = bEnabled;
+		else if (LowerName == "controllerdestroy")
+			StressFeatureFlags.bControllerDestruction = bEnabled;
+		else if (LowerName == "playerstatecleanup")
+			StressFeatureFlags.bPlayerStateCleanup = bEnabled;
+		else if (LowerName == "registryremoval")
+			StressFeatureFlags.bRegistryRemoval = bEnabled;
+		else if (LowerName == "invalidsweep")
+			StressFeatureFlags.bInvalidBotSweeping = bEnabled;
+		else
+			return false;
+
+		LOG_INFO(LogBots, "[BotStress] Feature flag {} set to {}.",
+			LowerName, bEnabled);
+		return true;
+	}
+
 	bool TryParseBotType(const std::string& Value, EPlayerBotType& OutType)
 	{
 		std::string LowerValue = Value;
@@ -530,13 +864,19 @@ namespace Bots
 
 	bool CancelBotOwnedDeathTimers(uint64 BotId, const char* Reason)
 	{
+		EnterLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::TimerCancellation);
+		LOG_INFO(LogBots, "[BotLifecycle] Timer cancellation stage entry bot={} reason={}.", BotId, Reason);
 		auto Entry = GetRegistry().GetBot(BotId);
 
 		if (!Entry)
 		{
 			LOG_WARN(LogBots, "[BotLifecycle] Timer cancellation skipped for bot {} because the registry entry no longer exists.",
 				BotId);
-			return GetRegistry().WasRemoved(BotId);
+			const bool bWasRemoved = GetRegistry().WasRemoved(BotId);
+			LOG_INFO(LogBots, "[BotLifecycle] Timer cancellation stage exit bot={} entryMissing=true removed={}.",
+				BotId, bWasRemoved);
+			CompleteLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::TimerCancellation);
+			return bWasRemoved;
 		}
 
 		auto Controller = Entry->Controller.Resolve<AController>();
@@ -565,15 +905,17 @@ namespace Bots
 			{ PlayerState, L"RestartPlayer", "RestartPlayer" },
 		};
 
+		int ValidTargets = 0;
+		int ActiveTimers = 0;
+		int ClearFailures = 0;
+		int StillActiveTimers = 0;
+
 		for (const auto& Timer : Timers)
 		{
 			if (!Timer.Target)
-			{
-				LOG_INFO(LogBots,
-					"[BotLifecycle] Timer cancellation bot={} callback={} targetValid=false active=false remaining=-1.00s cleared=false.",
-					BotId, Timer.CallbackName);
 				continue;
-			}
+
+			++ValidTargets;
 
 			const bool bWasActive = UKismetSystemLibrary::K2_IsTimerActive(Timer.Target, Timer.FunctionName);
 			const float Remaining = bWasActive
@@ -582,9 +924,19 @@ namespace Bots
 			const bool bClearCalled = UKismetSystemLibrary::K2_ClearTimer(Timer.Target, Timer.FunctionName);
 			const bool bStillActive = UKismetSystemLibrary::K2_IsTimerActive(Timer.Target, Timer.FunctionName);
 
-			LOG_INFO(LogBots,
-				"[BotLifecycle] Timer cancellation bot={} callback={} targetValid=true active={} remaining={:.2f}s cleared={} stillActive={}.",
-				BotId, Timer.CallbackName, bWasActive, Remaining, bClearCalled, bStillActive);
+			ActiveTimers += bWasActive;
+			ClearFailures += bWasActive && !bClearCalled;
+			StillActiveTimers += bStillActive;
+
+			// Inactive candidates are summarized below. Active timers and clear
+			// failures retain a detailed record without flooding the synchronous
+			// logger with eight lines per cancellation pass per bot.
+			if (bWasActive || bStillActive)
+			{
+				LOG_INFO(LogBots,
+					"[BotLifecycle] Timer cancellation bot={} callback={} active={} remaining={:.2f}s cleared={} stillActive={}.",
+					BotId, Timer.CallbackName, bWasActive, Remaining, bClearCalled, bStillActive);
+			}
 		}
 
 		// AActor lifespan uses an internal timer rather than K2_SetTimer. Zero
@@ -604,7 +956,11 @@ namespace Bots
 				BotId, bCancelled);
 		}
 
-		LOG_INFO(LogBots, "[BotLifecycle] Timer cancellation end bot={} reason={}.", BotId, Reason);
+		LOG_INFO(LogBots,
+			"[BotLifecycle] Timer cancellation end bot={} reason={} candidates={} validTargets={} active={} clearFailures={} stillActive={}.",
+			BotId, Reason, sizeof(Timers) / sizeof(Timers[0]), ValidTargets, ActiveTimers, ClearFailures, StillActiveTimers);
+		LOG_INFO(LogBots, "[BotLifecycle] Timer cancellation stage exit bot={} entryMissing=false.", BotId);
+		CompleteLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::TimerCancellation);
 		return true;
 	}
 
@@ -625,6 +981,7 @@ namespace Bots
 			return false;
 		}
 
+		EnterLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::DelayedDeathCallback);
 		auto Entry = GetRegistry().GetBot(BotId);
 
 		if (!Entry)
@@ -647,6 +1004,9 @@ namespace Bots
 	{
 		LOG_INFO(LogBots, "[BotLifecycle] Callback exit bot={} callback={} suppressed={}.",
 			BotId, CallbackName, bSuppressed);
+
+		if (BotId != 0)
+			CompleteLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::DelayedDeathCallback);
 	}
 
 	bool CleanupRegisteredBot(uint64 BotId, const char* Reason, bool bDestroyActors)
@@ -697,26 +1057,89 @@ namespace Bots
 			auto Pawn = Entry->Pawn.Resolve<AFortPlayerPawnAthena>();
 			auto Inventory = Entry->Inventory.Resolve<AFortInventory>();
 			const auto PlayerStateReference = Entry->PlayerState;
+			const auto FeatureFlags = GetBotStressFeatureFlags();
+			const bool bDiagnosticTarget = IsRecordedBotStressId(BotId);
+			const bool bUnpossessEnabled = !bDiagnosticTarget || FeatureFlags.bUnpossess;
+			const bool bPawnDestructionEnabled = !bDiagnosticTarget || FeatureFlags.bPawnDestruction;
+			const bool bControllerDestructionEnabled =
+				!bDiagnosticTarget || FeatureFlags.bControllerDestruction;
+			const bool bPlayerStateCleanupEnabled =
+				!bDiagnosticTarget || FeatureFlags.bPlayerStateCleanup;
 
 			if (Controller && Pawn && Controller->GetPawn() == Pawn)
-				Controller->UnPossess();
+			{
+				EnterLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::Unpossess);
+				LOG_INFO(LogBots, "[BotLifecycle] Unpossess entry bot={} enabled={}.",
+					BotId, bUnpossessEnabled);
 
+				if (bUnpossessEnabled)
+					Controller->UnPossess();
+
+				LOG_INFO(LogBots, "[BotLifecycle] Unpossess exit bot={} enabled={}.",
+					BotId, bUnpossessEnabled);
+				CompleteLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::Unpossess);
+			}
+
+			EnterLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::InventoryDestruction);
 			LOG_INFO(LogBots, "[BotLifecycle] Bot {} inventory destruction: valid={}.", BotId, Inventory != nullptr);
 			DestroyActorIfValid(Inventory);
+			CompleteLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::InventoryDestruction);
 
-			LOG_INFO(LogBots, "[BotLifecycle] Bot {} pawn destruction: valid={}.", BotId, Pawn != nullptr);
-			DestroyActorIfValid(Pawn);
+			EnterLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::PawnDestruction);
+			LOG_INFO(LogBots, "[BotLifecycle] Pawn destruction entry bot={} enabled={} valid={}.",
+				BotId, bPawnDestructionEnabled, Pawn != nullptr);
 
-			LOG_INFO(LogBots, "[BotLifecycle] Bot {} controller destruction: valid={}.", BotId, Controller != nullptr);
-			DestroyActorIfValid(Controller);
+			if (bPawnDestructionEnabled)
+				DestroyActorIfValid(Pawn);
+
+			LOG_INFO(LogBots, "[BotLifecycle] Pawn destruction exit bot={} enabled={}.",
+				BotId, bPawnDestructionEnabled);
+			CompleteLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::PawnDestruction);
+
+			EnterLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::ControllerDestruction);
+			LOG_INFO(LogBots, "[BotLifecycle] Controller destruction entry bot={} enabled={} valid={}.",
+				BotId, bControllerDestructionEnabled, Controller != nullptr);
+
+			if (bControllerDestructionEnabled)
+				DestroyActorIfValid(Controller);
+
+			LOG_INFO(LogBots, "[BotLifecycle] Controller destruction exit bot={} enabled={}.",
+				BotId, bControllerDestructionEnabled);
+			CompleteLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::ControllerDestruction);
 
 			auto PlayerState = PlayerStateReference.Resolve<AFortPlayerStateAthena>();
-			LOG_INFO(LogBots, "[BotLifecycle] Bot {} player state cleanup: valid={}.", BotId, PlayerState != nullptr);
-			DestroyActorIfValid(PlayerState);
+			EnterLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::PlayerStateHandling);
+			LOG_INFO(LogBots, "[BotLifecycle] Player-state handling entry bot={} enabled={} valid={}.",
+				BotId, bPlayerStateCleanupEnabled, PlayerState != nullptr);
+
+			if (bPlayerStateCleanupEnabled)
+				DestroyActorIfValid(PlayerState);
+
+			LOG_INFO(LogBots, "[BotLifecycle] Player-state handling exit bot={} enabled={}.",
+				BotId, bPlayerStateCleanupEnabled);
+			CompleteLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::PlayerStateHandling);
 		}
 		else
 		{
 			LOG_INFO(LogBots, "[BotLifecycle] Bot {} UObject destruction skipped for shutdown-safe invalidation.", BotId);
+		}
+
+		const auto FeatureFlags = GetBotStressFeatureFlags();
+		const bool bRegistryRemovalEnabled =
+			!IsRecordedBotStressId(BotId) || FeatureFlags.bRegistryRemoval;
+		EnterLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::RegistryRemoval);
+		LOG_INFO(LogBots, "[BotLifecycle] Registry removal entry bot={} enabled={}.",
+			BotId, bRegistryRemovalEnabled);
+
+		if (!bRegistryRemovalEnabled)
+		{
+			const bool bRestored = GetRegistry().RestoreAfterDiagnosticCleanup(BotId);
+			LOG_WARN(LogBots,
+				"[BotLifecycle] Registry removal skipped by diagnostic flag bot={} stateRestored={}.",
+				BotId, bRestored);
+			LOG_INFO(LogBots, "[BotLifecycle] Registry removal exit bot={} enabled=false removed=false.", BotId);
+			CompleteLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::RegistryRemoval);
+			return bRestored;
 		}
 
 		const bool bRemoved = GetRegistry().RemoveEntry(BotId);
@@ -730,6 +1153,9 @@ namespace Bots
 			LOG_ERROR(LogBots, "[BotLifecycle] Registry removal failed for bot {}.", BotId);
 		}
 
+		LOG_INFO(LogBots, "[BotLifecycle] Registry removal exit bot={} enabled=true removed={}.",
+			BotId, bRemoved);
+		CompleteLifecycleDiagnosticStage(BotId, EBotLifecycleDiagnosticStage::RegistryRemoval);
 		return bRemoved;
 	}
 }

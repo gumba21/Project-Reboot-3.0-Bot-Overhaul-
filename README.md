@@ -31,8 +31,12 @@ Available cheat-script commands:
 ```text
 spawnbot [count=1] [participant|practice]
 botlist
-botstresstest [count=10]
+botstressspawn [count=10]
+botstresskill
+botstresscleanup
 botstressstatus
+botstressflags
+botstressflag <name> <on|off>
 botinfo <id>
 despawnbot <id>
 despawnallbots
@@ -40,7 +44,11 @@ despawnallbots
 
 `spawnbot` and numeric forms such as `spawnbot 3` remain backward compatible and default to Participant. `spawnbot practice` and `spawnbot participant` select a type explicitly.
 
-`botstresstest` spawns and force-kills 10–25 Practice bots from a stable ID snapshot. It starts a pointer-free 15-second watchdog. After at least 15 seconds, run `botstressstatus`; a PASS confirms that the network tick still advanced, the command path responded, and every test bot is a completed dead Practice registry entry. Use `botlist` afterward to inspect the retained dead entries.
+Stress testing is split into isolated operations. `botstressspawn` only creates and records Practice bot IDs. `botstresskill` applies lethal damage and lets the current Practice death hook run without explicit cleanup. `botstresscleanup` exercises explicit destruction/registry cleanup without applying damage. `botstressstatus` reports every recorded ID, safe reference validity, the active phase, and the last entered/completed lifecycle stage.
+
+While a stress session is active, a game-thread heartbeat logs once per second using only cached primitive diagnostic state. It does not walk UObject arrays, resolve bot pointers, or validate registry entries. Object validation happens only when `botstressstatus` is explicitly requested. `botstressflag <name> <on|off>` can isolate `originalhandler`, `unpossess`, `pawndestroy`, `controllerdestroy`, `playerstatecleanup`, `registryremoval`, and `invalidsweep`. Death and cleanup overrides apply only to recorded stress bots; `invalidsweep` controls the diagnostic scan itself while testing.
+
+For isolation, first run `botstressspawn 10` and wait. Then choose exactly one follow-up: use `botstresskill` to test the death hook, or use `botstresscleanup` to test explicit destruction without death. The final heartbeat line identifies the last stage entered and completed if the game thread stops.
 
 The current bots still do not navigate, search, fight, loot, build, or make meaningful decisions. Practice-bot participation handling is initially targeted at **Fortnite 4.5**; later engine versions and native Chapter 2 bot managers may maintain additional match counters and remain outside this foundation PR.
 

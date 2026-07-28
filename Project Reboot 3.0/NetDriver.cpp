@@ -42,6 +42,11 @@ void UNetDriver::RemoveNetworkActor(AActor* Actor)
 
 void UNetDriver::TickFlushHook(UNetDriver* NetDriver)
 {
+	// Primitive-only stress heartbeat. Run it before any UObject sweep so the
+	// log shows whether the game thread reached this tick and whether the sweep
+	// itself is the next stage that stalls.
+	Bots::TickBotStressHeartbeat();
+
 	// Lifecycle validation stays active even while behavior ticking is disabled.
 	// It only logs and cleans when a tracked UObject becomes invalid.
 	Bots::SweepInvalidBots(true);
