@@ -1357,6 +1357,85 @@ DWORD WINAPI Main(LPVOID)
             AFortPlayerControllerAthena::ServerRestartPlayerHook,
             nullptr, false);
     }
+    else
+    {
+        // Older builds (including Fortnite 4.5) can invoke restart through a
+        // delayed ProcessEvent callback. Guard that callback independently of
+        // the immediate ClientOnPawnDied call-site hook.
+        static auto ServerRestartPlayerFn = FindObject<UFunction>(L"/Script/Engine.PlayerController.ServerRestartPlayer");
+
+        if (ServerRestartPlayerFn)
+        {
+            const bool bHooked = Hooking::MinHook::Hook(FortPlayerControllerAthenaDefault, ServerRestartPlayerFn,
+                AFortPlayerControllerAthena::ServerRestartPlayerCallbackHook,
+                (PVOID*)&AFortPlayerControllerAthena::ServerRestartPlayerCallbackOriginal, false, true);
+
+            if (bHooked)
+            {
+                LOG_INFO(LogBots, "[BotLifecycle] Installed delayed callback guard for ServerRestartPlayer.");
+            }
+            else
+            {
+                LOG_ERROR(LogBots, "[BotLifecycle] Failed to install delayed callback guard for ServerRestartPlayer.");
+            }
+        }
+        else
+        {
+            LOG_WARN(LogBots, "[BotLifecycle] ServerRestartPlayer callback guard was not installed because the UFunction was not found.");
+        }
+    }
+
+    auto SpectateOnDeathFn = FindObject<UFunction>(L"/Script/FortniteGame.FortPlayerControllerZone.SpectateOnDeath");
+    auto SpectateOnDeathDefault = (UObject*)FortPlayerControllerZoneDefault;
+
+    if (!SpectateOnDeathFn)
+    {
+        SpectateOnDeathFn = FindObject<UFunction>(L"/Script/FortniteGame.FortPlayerControllerAthena.SpectateOnDeath");
+        SpectateOnDeathDefault = FortPlayerControllerAthenaDefault;
+    }
+
+    if (SpectateOnDeathFn && SpectateOnDeathDefault)
+    {
+        const bool bHooked = Hooking::MinHook::Hook(SpectateOnDeathDefault, SpectateOnDeathFn,
+            AFortPlayerControllerAthena::SpectateOnDeathHook,
+            (PVOID*)&AFortPlayerControllerAthena::SpectateOnDeathOriginal, false, true);
+
+        if (bHooked)
+        {
+            LOG_INFO(LogBots, "[BotLifecycle] Installed delayed callback guard for SpectateOnDeath (known Fortnite 4.5 delay=5.00s).");
+        }
+        else
+        {
+            LOG_ERROR(LogBots, "[BotLifecycle] Failed to install delayed callback guard for SpectateOnDeath.");
+        }
+    }
+    else
+    {
+        LOG_WARN(LogBots, "[BotLifecycle] SpectateOnDeath callback guard was not installed because the UFunction or default object was not found.");
+    }
+
+    auto RespawnPlayerAfterDeathFn =
+        FindObject<UFunction>(L"/Script/FortniteGame.FortPlayerControllerAthena.RespawnPlayerAfterDeath");
+
+    if (RespawnPlayerAfterDeathFn)
+    {
+        const bool bHooked = Hooking::MinHook::Hook(FortPlayerControllerAthenaDefault, RespawnPlayerAfterDeathFn,
+            AFortPlayerControllerAthena::RespawnPlayerAfterDeathHook,
+            (PVOID*)&AFortPlayerControllerAthena::RespawnPlayerAfterDeathOriginal, false, true);
+
+        if (bHooked)
+        {
+            LOG_INFO(LogBots, "[BotLifecycle] Installed delayed callback guard for RespawnPlayerAfterDeath.");
+        }
+        else
+        {
+            LOG_ERROR(LogBots, "[BotLifecycle] Failed to install delayed callback guard for RespawnPlayerAfterDeath.");
+        }
+    }
+    else
+    {
+        LOG_WARN(LogBots, "[BotLifecycle] RespawnPlayerAfterDeath callback guard was not installed because the UFunction was not found.");
+    }
 
     auto OnRep_EditActorFn = FindObject<UFunction>(L"/Script/FortniteGame.FortWeap_EditingTool.OnRep_EditActor");
 
@@ -1859,9 +1938,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved)
         CreateThread(0, 0, Main, 0, 0, 0);
         break;
     case DLL_PROCESS_DETACH:
+        // Do not call ProcessEvent or destroy actors while the loader lock is
+        // held. Drop all registry references so an unloaded DLL cannot retain
+        // stale UObject addresses.
+        Bots::Shutdown(false);
         break;
     }
 
     return TRUE;
 }
-

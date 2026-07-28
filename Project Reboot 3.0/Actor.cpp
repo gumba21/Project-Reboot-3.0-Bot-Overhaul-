@@ -72,6 +72,17 @@ void AActor::K2_DestroyActor()
 	this->ProcessEvent(DestroyActorFn);
 }
 
+bool AActor::SetLifeSpan(float InLifespan)
+{
+	static auto SetLifeSpanFn = FindObject<UFunction>(L"/Script/Engine.Actor.SetLifeSpan");
+
+	if (!SetLifeSpanFn)
+		return false;
+
+	this->ProcessEvent(SetLifeSpanFn, &InLifespan);
+	return true;
+}
+
 UActorComponent* AActor::GetComponentByClass(class UClass* ComponentClass)
 {
 	static auto fn = FindObject<UFunction>("/Script/Engine.Actor.GetComponentByClass");

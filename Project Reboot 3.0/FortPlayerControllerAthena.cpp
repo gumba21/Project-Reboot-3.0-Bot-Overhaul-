@@ -12,6 +12,38 @@
 #include "FortAthenaMutator_InventoryOverride.h"
 #include "FortGadgetItemDefinition.h"
 #include "gui.h"
+#include "bot_registry.h"
+
+namespace
+{
+	void RunDelayedDeathCallback(UObject* Context, FFrame& Stack, void* Ret,
+		const char* CallbackName, void (*Original)(UObject*, FFrame&, void*))
+	{
+		auto Controller = Cast<AFortPlayerControllerAthena>(Context);
+		uint64 BotId = 0;
+		const bool bSuppress = Controller &&
+			Bots::ShouldSuppressDelayedDeathCallback(Controller, CallbackName, &BotId);
+
+		if (bSuppress)
+		{
+			LOG_WARN(LogBots, "[BotLifecycle] Delayed callback suppressed bot={} callback={}.", BotId, CallbackName);
+			Bots::LogDelayedDeathCallbackExit(BotId, CallbackName, true);
+			return;
+		}
+
+		if (Original)
+		{
+			Original(Context, Stack, Ret);
+		}
+		else
+		{
+			LOG_ERROR(LogBots, "[BotLifecycle] Callback {} has no original handler; normal path could not continue.",
+				CallbackName);
+		}
+
+		Bots::LogDelayedDeathCallbackExit(BotId, CallbackName, false);
+	}
+}
 
 void AFortPlayerControllerAthena::StartGhostModeHook(UObject* Context, FFrame* Stack, void* Ret)
 {
@@ -350,6 +382,15 @@ void AFortPlayerControllerAthena::ServerRequestSeatChangeHook(AFortPlayerControl
 
 void AFortPlayerControllerAthena::ServerRestartPlayerHook(AFortPlayerControllerAthena* Controller)
 {
+	uint64 BotId = 0;
+
+	if (Bots::ShouldSuppressDelayedDeathCallback(Controller, "ServerRestartPlayer", &BotId))
+	{
+		LOG_WARN(LogBots, "[BotLifecycle] Native restart callback suppressed bot={}.", BotId);
+		Bots::LogDelayedDeathCallbackExit(BotId, "ServerRestartPlayer", true);
+		return;
+	}
+
 	static auto FortPlayerControllerZoneDefault = FindObject<UClass>(L"/Script/FortniteGame.Default__FortPlayerControllerZone");
 	static auto ServerRestartPlayerFn = FindObject<UFunction>(L"/Script/Engine.PlayerController.ServerRestartPlayer");
 	static auto ZoneServerRestartPlayer = __int64(FortPlayerControllerZoneDefault->VFTable[GetFunctionIdxOrPtr(ServerRestartPlayerFn) / 8]);
@@ -363,7 +404,23 @@ void AFortPlayerControllerAthena::ServerRestartPlayerHook(AFortPlayerControllerA
 	// Controller->SetPlayerIsWaiting(true);
 
 	LOG_INFO(LogDev, "ServerRestartPlayerHook Call 0x{:x} returning with 0x{:x}!", ZoneServerRestartPlayer - __int64(_ReturnAddress()), __int64(ZoneServerRestartPlayerOriginal) - __int64(GetModuleHandleW(0)));
-	return ZoneServerRestartPlayerOriginal(Controller);
+	ZoneServerRestartPlayerOriginal(Controller);
+	Bots::LogDelayedDeathCallbackExit(BotId, "ServerRestartPlayer", false);
+}
+
+void AFortPlayerControllerAthena::SpectateOnDeathHook(UObject* Context, FFrame& Stack, void* Ret)
+{
+	RunDelayedDeathCallback(Context, Stack, Ret, "SpectateOnDeath", SpectateOnDeathOriginal);
+}
+
+void AFortPlayerControllerAthena::RespawnPlayerAfterDeathHook(UObject* Context, FFrame& Stack, void* Ret)
+{
+	RunDelayedDeathCallback(Context, Stack, Ret, "RespawnPlayerAfterDeath", RespawnPlayerAfterDeathOriginal);
+}
+
+void AFortPlayerControllerAthena::ServerRestartPlayerCallbackHook(UObject* Context, FFrame& Stack, void* Ret)
+{
+	RunDelayedDeathCallback(Context, Stack, Ret, "ServerRestartPlayer", ServerRestartPlayerCallbackOriginal);
 }
 
 void AFortPlayerControllerAthena::ServerGiveCreativeItemHook(AFortPlayerControllerAthena* Controller, FFortItemEntry CreativeItem)

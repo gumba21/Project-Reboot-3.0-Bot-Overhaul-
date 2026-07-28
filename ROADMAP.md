@@ -25,14 +25,29 @@ This roadmap separates infrastructure, custom player-bot AI, and native Chapter 
 Planned commands:
 
 ```text
-spawnbot <count> [practice|participant]
+spawnbot [count=1] [participant|practice]
 botlist
-botstatus <id>
+botstressspawn [count=10]
+botstresskill
+botstresscleanup
+botstressstatus
+botstressflags
+botstressflag <name> <on|off>
+botinfo <id>
 despawnbot <id>
 despawnallbots
 ```
 
 **Exit condition:** bots can repeatedly spawn, die, and despawn without restarting or corrupting the match.
+
+Foundation implementation notes:
+
+- Bot IDs are monotonic for the lifetime of the loaded DLL and are not reset between matches.
+- Registry references pair the UObject address with its global object-array index and serial number so recycled slots are rejected.
+- Dead entries remain inspectable until explicit despawn, match/world reset, or shutdown.
+- Practice bots are excluded at both Fortnite 4.5 participation boundaries: spawn does not increment `PlayersLeft` or add to `AlivePlayers`, and death does not call `RemoveFromAlivePlayers`.
+- Participant bots retain the original engine removal path on death.
+- DLL detach invalidates registry references without invoking Unreal functions under the Windows loader lock.
 
 ## Phase 2 — Practice and participant modes
 

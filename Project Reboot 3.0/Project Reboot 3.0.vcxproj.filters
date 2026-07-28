@@ -28,6 +28,9 @@
     <ClCompile Include="FortGameModeAthena.cpp">
       <Filter>FortniteGame\Source\FortniteGame\Private</Filter>
     </ClCompile>
+    <ClCompile Include="bot_registry.cpp">
+      <Filter>Reboot\Private</Filter>
+    </ClCompile>
     <ClCompile Include="World.cpp">
       <Filter>Engine\Source\Runtime\Engine\Private</Filter>
     </ClCompile>
@@ -850,6 +853,9 @@
       <Filter>FortniteGame\Source\FortniteGame\Public\Items</Filter>
     </ClInclude>
     <ClInclude Include="bots.h">
+      <Filter>Reboot\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="bot_registry.h">
       <Filter>Reboot\Public</Filter>
     </ClInclude>
     <ClInclude Include="gui.h">

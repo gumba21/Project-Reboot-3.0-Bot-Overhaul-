@@ -314,6 +314,7 @@ void SetupEverythingAI() // find better name lol
 
 bool AFortGameModeAthena::Athena_ReadyToStartMatchHook(AFortGameModeAthena* GameMode)
 {
+	Bots::PrepareForWorld(GetWorld());
 	Globals::bHitReadyToStartMatch = true;
 
 	auto GameState = GameMode->GetGameStateAthena();

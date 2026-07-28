@@ -124,6 +124,71 @@ public:
 		return K2_SetTimer_Params.ret;
 	}
 
+	static bool K2_ClearTimer(UObject* Object, FString FunctionName)
+	{
+		if (!Object)
+			return false;
+
+		struct
+		{
+			UObject* Object;
+			FString FunctionName;
+		} K2_ClearTimer_Params{ Object, FunctionName };
+
+		static auto KismetSystemLibrary = FindObject("/Script/Engine.Default__KismetSystemLibrary");
+		static auto K2_ClearTimerFn = FindObject<UFunction>("/Script/Engine.KismetSystemLibrary.K2_ClearTimer");
+
+		if (!KismetSystemLibrary || !K2_ClearTimerFn)
+			return false;
+
+		KismetSystemLibrary->ProcessEvent(K2_ClearTimerFn, &K2_ClearTimer_Params);
+		return true;
+	}
+
+	static bool K2_IsTimerActive(UObject* Object, FString FunctionName)
+	{
+		if (!Object)
+			return false;
+
+		struct
+		{
+			UObject* Object;
+			FString FunctionName;
+			bool ReturnValue;
+		} K2_IsTimerActive_Params{ Object, FunctionName };
+
+		static auto KismetSystemLibrary = FindObject("/Script/Engine.Default__KismetSystemLibrary");
+		static auto K2_IsTimerActiveFn = FindObject<UFunction>("/Script/Engine.KismetSystemLibrary.K2_IsTimerActive");
+
+		if (!KismetSystemLibrary || !K2_IsTimerActiveFn)
+			return false;
+
+		KismetSystemLibrary->ProcessEvent(K2_IsTimerActiveFn, &K2_IsTimerActive_Params);
+		return K2_IsTimerActive_Params.ReturnValue;
+	}
+
+	static float K2_GetTimerRemainingTime(UObject* Object, FString FunctionName)
+	{
+		if (!Object)
+			return -1.f;
+
+		struct
+		{
+			UObject* Object;
+			FString FunctionName;
+			float ReturnValue;
+		} K2_GetTimerRemainingTime_Params{ Object, FunctionName };
+
+		static auto KismetSystemLibrary = FindObject("/Script/Engine.Default__KismetSystemLibrary");
+		static auto K2_GetTimerRemainingTimeFn = FindObject<UFunction>("/Script/Engine.KismetSystemLibrary.K2_GetTimerRemainingTime");
+
+		if (!KismetSystemLibrary || !K2_GetTimerRemainingTimeFn)
+			return -1.f;
+
+		KismetSystemLibrary->ProcessEvent(K2_GetTimerRemainingTimeFn, &K2_GetTimerRemainingTime_Params);
+		return K2_GetTimerRemainingTime_Params.ReturnValue;
+	}
+
 	static bool LineTraceSingle(UObject* WorldContextObject, FVector Start, FVector End, ETraceTypeQuery TraceChannel, bool bTraceComplex, 
 		TArray<AActor*> ActorsToIgnore, EDrawDebugTrace DrawDebugType, bool bIgnoreSelf, FLinearColor TraceColor, FLinearColor TraceHitColor,
 		float DrawTime, FHitResult** OutHit)

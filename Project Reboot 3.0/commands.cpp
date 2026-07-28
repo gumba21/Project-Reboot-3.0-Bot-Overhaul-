@@ -7,6 +7,25 @@
 
 std::map<std::string, FVector> Waypoints;
 
+namespace
+{
+	std::wstring WidenBotText(const std::string& Value)
+	{
+		return std::wstring(Value.begin(), Value.end());
+	}
+
+	std::wstring FormatBotSummary(const FPlayerBotRegistryEntry& Entry)
+	{
+		return L"#" + std::to_wstring(Entry.BotId) +
+			L" type=" + WidenBotText(Bots::BotTypeToString(Entry.Type)) +
+			L" state=" + WidenBotText(Bots::BotStateToString(Entry.State)) +
+			L" name=" + WidenBotText(Entry.DisplayName) +
+			L" refs[C=" + std::to_wstring(Entry.Controller.IsValid()) +
+			L" P=" + std::to_wstring(Entry.Pawn.IsValid()) +
+			L" PS=" + std::to_wstring(Entry.PlayerState.IsValid()) + L"]";
+	}
+}
+
 void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 {
 	bool isMsgEmpty = !Msg.Data.Data || Msg.Data.Num() <= 0;
@@ -136,6 +155,12 @@ void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 	{
 		auto& Command = Arguments[0];
 		std::transform(Command.begin(), Command.end(), Command.begin(), ::tolower);
+
+		// Stress commands must remain reachable even when invalid sweeping is
+		// the operation under investigation. Normal commands retain the
+		// command-entry sweep in addition to the network-tick sweep.
+		if (Command.rfind("botstress", 0) != 0)
+			Bots::SweepInvalidBots();
 
 		if (Command == "giveitem")
 		{
@@ -775,11 +800,51 @@ void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 			}
 
 			int Count = 1;
+			EPlayerBotType Type = EPlayerBotType::Participant;
+			size_t NextArgument = 1;
 
-			if (Arguments.size() >= 2)
+			if (Arguments.size() > NextArgument)
 			{
-				try { Count = std::stod(Arguments[1]); }
-				catch (...) {}
+				if (Bots::TryParseBotType(Arguments[NextArgument], Type))
+				{
+					++NextArgument;
+				}
+				else
+				{
+					try
+					{
+						Count = std::stoi(Arguments[NextArgument]);
+						++NextArgument;
+					}
+					catch (...)
+					{
+						SendMessageToConsole(PlayerController, L"Usage: spawnbot [count] [participant|practice]");
+						return;
+					}
+				}
+			}
+
+			if (Arguments.size() > NextArgument)
+			{
+				if (!Bots::TryParseBotType(Arguments[NextArgument], Type))
+				{
+					SendMessageToConsole(PlayerController, L"Bot type must be participant or practice.");
+					return;
+				}
+
+				++NextArgument;
+			}
+
+			if (Arguments.size() > NextArgument)
+			{
+				SendMessageToConsole(PlayerController, L"Usage: spawnbot [count] [participant|practice]");
+				return;
+			}
+
+			if (Count < 1)
+			{
+				SendMessageToConsole(PlayerController, L"Bot count must be at least 1.");
+				return;
 			}
 
 			constexpr int Max = 99;
@@ -804,20 +869,385 @@ void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 				Transform.Translation = Loc;
 				Transform.Scale3D = FVector(1, 1, 1);
 
-				auto NewActor = Bots::SpawnBot(Transform, Pawn);
+				auto SpawnResult = Bots::SpawnBotDetailed(Transform, Pawn, Type);
 
-				if (!NewActor)
+				if (!SpawnResult)
 				{
-					SendMessageToConsole(PlayerController, L"Failed to spawn an actor!");
+					SendMessageToConsole(PlayerController, L"Failed to spawn bot; see [BotLifecycle] logs.");
 				}
 				else
 				{
 					AmountSpawned++;
+					SendMessageToConsole(PlayerController,
+						(L"Spawned bot #" + std::to_wstring(SpawnResult.BotId) +
+							L" as " + WidenBotText(Bots::BotTypeToString(Type)) + L".").c_str());
 				}
 			}
 
 			if (AmountSpawned > 0)
-				SendMessageToConsole(PlayerController, L"Summoned!");
+				SendMessageToConsole(PlayerController,
+					(L"Spawned " + std::to_wstring(AmountSpawned) + L" bot(s).").c_str());
+		}
+		else if (Command == "botlist")
+		{
+			const auto Entries = Bots::GetRegistry().GetBots();
+			int AliveCount = 0;
+			int DeadCount = 0;
+			int ParticipantCount = 0;
+			int PracticeCount = 0;
+
+			for (const auto& Entry : Entries)
+			{
+				AliveCount += Entry.State == EPlayerBotLifecycleState::Alive;
+				DeadCount += Entry.State == EPlayerBotLifecycleState::Dead;
+				ParticipantCount += Entry.Type == EPlayerBotType::Participant;
+				PracticeCount += Entry.Type == EPlayerBotType::Practice;
+			}
+
+			SendMessageToConsole(PlayerController,
+				(L"Bots: total=" + std::to_wstring(Entries.size()) +
+					L" alive=" + std::to_wstring(AliveCount) +
+					L" dead=" + std::to_wstring(DeadCount) +
+					L" participant=" + std::to_wstring(ParticipantCount) +
+					L" practice=" + std::to_wstring(PracticeCount) + L".").c_str());
+
+			for (const auto& Entry : Entries)
+				SendMessageToConsole(PlayerController, FormatBotSummary(Entry).c_str());
+		}
+		else if (Command == "botstresstest")
+		{
+			SendMessageToConsole(PlayerController,
+				L"botstresstest is now isolated. Use botstressspawn [count], then botstresskill or botstresscleanup.");
+		}
+		else if (Command == "botstressspawn")
+		{
+			if (GameState->GetGamePhase() < EAthenaGamePhase::Aircraft)
+			{
+				SendMessageToConsole(PlayerController, L"Bot stress testing before aircraft is not allowed.");
+				return;
+			}
+
+			int Count = 10;
+
+			if (NumArgs >= 1)
+			{
+				try { Count = std::stoi(Arguments[1]); }
+				catch (...)
+				{
+					SendMessageToConsole(PlayerController, L"Usage: botstressspawn [count=10]");
+					return;
+				}
+			}
+
+			if (Count < 1)
+			{
+				SendMessageToConsole(PlayerController, L"Stress-test count must be at least 1.");
+				return;
+			}
+
+			if (Count > 25)
+			{
+				SendMessageToConsole(PlayerController, L"Stress-test count is capped at 25.");
+				Count = 25;
+			}
+
+			auto SpawnOriginPawn = ReceivingController->GetPawn();
+
+			if (!SpawnOriginPawn)
+			{
+				SendMessageToConsole(PlayerController, L"No pawn to run the stress test at.");
+				return;
+			}
+
+			const auto ExistingStress = Bots::GetBotStressDiagnosticSnapshot();
+			const auto ExistingStressIds = Bots::GetBotStressIds();
+			bool bHasRecordedRegistryEntries = false;
+
+			for (const auto BotId : ExistingStressIds)
+			{
+				if (Bots::GetRegistry().GetBot(BotId))
+				{
+					bHasRecordedRegistryEntries = true;
+					break;
+				}
+			}
+
+			if (ExistingStress.bActive &&
+				(ExistingStress.Phase != EBotStressPhase::Cleaned || bHasRecordedRegistryEntries))
+			{
+				SendMessageToConsole(PlayerController,
+					L"A stress session is already active. Run botstressstatus, then botstresscleanup before starting another.");
+				return;
+			}
+
+			Bots::BeginBotStressSession(Count);
+			const auto Origin = SpawnOriginPawn->GetActorLocation();
+
+			for (int Index = 0; Index < Count; ++Index)
+			{
+				FTransform Transform;
+				Transform.Translation = FVector(
+					Origin.X + float((Index % 5) * 150),
+					Origin.Y + float((Index / 5) * 150),
+					Origin.Z + 1000.f);
+				Transform.Scale3D = FVector(1, 1, 1);
+
+				auto SpawnResult = Bots::SpawnBotDetailed(Transform, SpawnOriginPawn, EPlayerBotType::Practice);
+
+				if (SpawnResult)
+					Bots::RecordBotStressSpawn(SpawnResult.BotId);
+			}
+
+			Bots::SetBotStressPhase(EBotStressPhase::Spawned);
+			const auto SpawnedIds = Bots::GetBotStressIds();
+			LOG_INFO(LogBots, "[BotStress] Spawn-only phase completed requested={} spawned={}.",
+				Count, SpawnedIds.size());
+			SendMessageToConsole(PlayerController,
+				(L"Bot stress spawn: created " + std::to_wstring(SpawnedIds.size()) +
+					L" Practice bots. No damage or cleanup was requested.").c_str());
+		}
+		else if (Command == "botstresskill")
+		{
+			const auto Snapshot = Bots::GetBotStressDiagnosticSnapshot();
+			const auto StressBotIds = Bots::GetBotStressIds();
+
+			if (!Snapshot.bActive || StressBotIds.empty())
+			{
+				SendMessageToConsole(PlayerController, L"No recorded stress bots. Run botstressspawn first.");
+				return;
+			}
+
+			if (Snapshot.Phase != EBotStressPhase::Spawned)
+			{
+				SendMessageToConsole(PlayerController,
+					L"botstresskill requires the Spawned phase. Run botstressstatus to inspect the current phase.");
+				return;
+			}
+
+			Bots::SetBotStressPhase(EBotStressPhase::Killing);
+			int KillRequests = 0;
+
+			// Iterate the stable ID snapshot. ForceKill may synchronously update
+			// registry entry state through the Practice death hook.
+			for (const auto BotId : StressBotIds)
+			{
+				if (Bots::ForceKillBotForStressTest(BotId, PlayerController))
+				{
+					++KillRequests;
+					Bots::RecordBotStressKillRequest();
+				}
+			}
+
+			Bots::SetBotStressPhase(EBotStressPhase::Killed);
+			LOG_INFO(LogBots, "[BotStress] Kill-only phase completed recorded={} killRequests={}.",
+				StressBotIds.size(), KillRequests);
+			SendMessageToConsole(PlayerController,
+				(L"Bot stress kill: requested lethal damage for " + std::to_wstring(KillRequests) +
+					L" of " + std::to_wstring(StressBotIds.size()) +
+					L" recorded bots. No explicit cleanup was requested.").c_str());
+		}
+		else if (Command == "botstresscleanup")
+		{
+			const auto Snapshot = Bots::GetBotStressDiagnosticSnapshot();
+			const auto StressBotIds = Bots::GetBotStressIds();
+
+			if (!Snapshot.bActive || StressBotIds.empty())
+			{
+				SendMessageToConsole(PlayerController, L"No recorded stress bots. Run botstressspawn first.");
+				return;
+			}
+
+			if (Snapshot.Phase == EBotStressPhase::Cleaning)
+			{
+				SendMessageToConsole(PlayerController, L"Stress cleanup is already in progress.");
+				return;
+			}
+
+			Bots::SetBotStressPhase(EBotStressPhase::Cleaning);
+			int CleanupRequests = 0;
+
+			// This path never applies damage. It exercises only the explicit,
+			// idempotent registry cleanup/destruction transaction.
+			for (const auto BotId : StressBotIds)
+			{
+				if (Bots::DespawnBot(BotId, "isolated stress cleanup"))
+				{
+					++CleanupRequests;
+					Bots::RecordBotStressCleanupRequest();
+				}
+			}
+
+			Bots::SetBotStressPhase(EBotStressPhase::Cleaned);
+			LOG_INFO(LogBots, "[BotStress] Cleanup-only phase completed recorded={} cleanupRequests={}.",
+				StressBotIds.size(), CleanupRequests);
+			SendMessageToConsole(PlayerController,
+				(L"Bot stress cleanup: processed " + std::to_wstring(CleanupRequests) +
+					L" of " + std::to_wstring(StressBotIds.size()) +
+					L" recorded bots without lethal damage.").c_str());
+		}
+		else if (Command == "botstressstatus")
+		{
+			const auto Snapshot = Bots::GetBotStressDiagnosticSnapshot();
+			const auto StressBotIds = Bots::GetBotStressIds();
+			const auto FeatureFlags = Bots::GetBotStressFeatureFlags();
+
+			SendMessageToConsole(PlayerController,
+				(L"Bot stress: active=" + std::to_wstring(Snapshot.bActive) +
+					L" phase=" + WidenBotText(Bots::BotStressPhaseToString(Snapshot.Phase)) +
+					L" age=" + std::to_wstring((int)Snapshot.AgeSeconds) +
+					L"s heartbeat=" + std::to_wstring(Snapshot.HeartbeatNumber) +
+					L" watchdogTicking=" + std::to_wstring(Snapshot.bHeartbeatTicking) +
+					L" registryCount=" + std::to_wstring(Snapshot.CachedRegistryCount) +
+					L" requested=" + std::to_wstring(Snapshot.RequestedCount) +
+					L" spawned=" + std::to_wstring(Snapshot.SpawnedCount) +
+					L" kills=" + std::to_wstring(Snapshot.KillRequests) +
+					L" cleanups=" + std::to_wstring(Snapshot.CleanupRequests) + L".").c_str());
+
+			SendMessageToConsole(PlayerController,
+				(L"Lifecycle: lastEntered=" +
+					WidenBotText(Bots::BotLifecycleDiagnosticStageToString(Snapshot.LastEnteredStage)) +
+					L" bot=" + std::to_wstring(Snapshot.LastEnteredBotId) +
+					L" lastCompleted=" +
+					WidenBotText(Bots::BotLifecycleDiagnosticStageToString(Snapshot.LastCompletedStage)) +
+					L" bot=" + std::to_wstring(Snapshot.LastCompletedBotId) + L".").c_str());
+
+			SendMessageToConsole(PlayerController,
+				(L"Flags: originalhandler=" + std::to_wstring(FeatureFlags.bOriginalFortniteDeathHandler) +
+					L" unpossess=" + std::to_wstring(FeatureFlags.bUnpossess) +
+					L" pawndestroy=" + std::to_wstring(FeatureFlags.bPawnDestruction) +
+					L" controllerdestroy=" + std::to_wstring(FeatureFlags.bControllerDestruction) +
+					L" playerstatecleanup=" + std::to_wstring(FeatureFlags.bPlayerStateCleanup) +
+					L" registryremoval=" + std::to_wstring(FeatureFlags.bRegistryRemoval) +
+					L" invalidsweep=" + std::to_wstring(FeatureFlags.bInvalidBotSweeping) + L".").c_str());
+
+			for (const auto BotId : StressBotIds)
+			{
+				auto Entry = Bots::GetRegistry().GetBot(BotId);
+
+				if (!Entry)
+				{
+					SendMessageToConsole(PlayerController,
+						(L"#" + std::to_wstring(BotId) +
+							L" registry=0 removed=" + std::to_wstring(Bots::GetRegistry().WasRemoved(BotId)) +
+							L" controller=0 pawn=0 playerState=0.").c_str());
+					continue;
+				}
+
+				SendMessageToConsole(PlayerController,
+					(L"#" + std::to_wstring(BotId) +
+						L" registry=1 type=" + WidenBotText(Bots::BotTypeToString(Entry->Type)) +
+						L" state=" + WidenBotText(Bots::BotStateToString(Entry->State)) +
+						L" controller=" + std::to_wstring(Entry->Controller.IsValid()) +
+						L" pawn=" + std::to_wstring(Entry->Pawn.IsValid()) +
+						L" playerState=" + std::to_wstring(Entry->PlayerState.IsValid()) +
+						L" deathInProgress=" + std::to_wstring(Entry->bDeathNotificationInProgress) +
+						L" deathHandled=" + std::to_wstring(Entry->bDeathNotificationHandled) + L".").c_str());
+			}
+		}
+		else if (Command == "botstressflags")
+		{
+			const auto FeatureFlags = Bots::GetBotStressFeatureFlags();
+			SendMessageToConsole(PlayerController,
+				(L"Bot stress flags: originalhandler=" + std::to_wstring(FeatureFlags.bOriginalFortniteDeathHandler) +
+					L" unpossess=" + std::to_wstring(FeatureFlags.bUnpossess) +
+					L" pawndestroy=" + std::to_wstring(FeatureFlags.bPawnDestruction) +
+					L" controllerdestroy=" + std::to_wstring(FeatureFlags.bControllerDestruction) +
+					L" playerstatecleanup=" + std::to_wstring(FeatureFlags.bPlayerStateCleanup) +
+					L" registryremoval=" + std::to_wstring(FeatureFlags.bRegistryRemoval) +
+					L" invalidsweep=" + std::to_wstring(FeatureFlags.bInvalidBotSweeping) + L".").c_str());
+		}
+		else if (Command == "botstressflag")
+		{
+			if (NumArgs < 2)
+			{
+				SendMessageToConsole(PlayerController,
+					L"Usage: botstressflag <originalhandler|unpossess|pawndestroy|controllerdestroy|playerstatecleanup|registryremoval|invalidsweep> <on|off>");
+				return;
+			}
+
+			auto FlagValue = Arguments[2];
+			std::transform(FlagValue.begin(), FlagValue.end(), FlagValue.begin(), ::tolower);
+
+			if (FlagValue != "on" && FlagValue != "off")
+			{
+				SendMessageToConsole(PlayerController, L"Flag value must be on or off.");
+				return;
+			}
+
+			const bool bEnabled = FlagValue == "on";
+
+			if (!Bots::SetBotStressFeatureFlag(Arguments[1], bEnabled))
+			{
+				SendMessageToConsole(PlayerController, L"Unknown bot stress feature flag.");
+				return;
+			}
+
+			SendMessageToConsole(PlayerController,
+				(L"Bot stress flag " + WidenBotText(Arguments[1]) +
+					L" set to " + (bEnabled ? L"on." : L"off.")).c_str());
+		}
+		else if (Command == "botinfo")
+		{
+			if (NumArgs < 1)
+			{
+				SendMessageToConsole(PlayerController, L"Usage: botinfo <id>");
+				return;
+			}
+
+			uint64 BotId = 0;
+
+			try { BotId = std::stoull(Arguments[1]); }
+			catch (...)
+			{
+				SendMessageToConsole(PlayerController, L"Bot ID must be a positive number.");
+				return;
+			}
+
+			auto Entry = Bots::GetRegistry().GetBot(BotId);
+
+			if (!Entry)
+			{
+				SendMessageToConsole(PlayerController, (L"No registered bot with ID " + std::to_wstring(BotId) + L".").c_str());
+				return;
+			}
+
+			SendMessageToConsole(PlayerController, FormatBotSummary(*Entry).c_str());
+			SendMessageToConsole(PlayerController,
+				(L"age=" + std::to_wstring(Entry->GetSpawnAgeSeconds()) +
+					L"s aliveTracking=" + std::to_wstring(Entry->bCountedAsAliveParticipant) +
+					L" deathInProgress=" + std::to_wstring(Entry->bDeathNotificationInProgress) +
+					L" deathHandled=" + std::to_wstring(Entry->bDeathNotificationHandled) +
+					L" pendingCleanup=" + std::to_wstring(Entry->State == EPlayerBotLifecycleState::PendingCleanup) +
+					L" removed=" + std::to_wstring(Entry->State == EPlayerBotLifecycleState::Removed) +
+					L" inventoryValid=" + std::to_wstring(Entry->Inventory.IsValid()) + L".").c_str());
+		}
+		else if (Command == "despawnbot")
+		{
+			if (NumArgs < 1)
+			{
+				SendMessageToConsole(PlayerController, L"Usage: despawnbot <id>");
+				return;
+			}
+
+			uint64 BotId = 0;
+
+			try { BotId = std::stoull(Arguments[1]); }
+			catch (...)
+			{
+				SendMessageToConsole(PlayerController, L"Bot ID must be a positive number.");
+				return;
+			}
+
+			if (Bots::DespawnBot(BotId))
+				SendMessageToConsole(PlayerController, (L"Despawned bot #" + std::to_wstring(BotId) + L".").c_str());
+			else
+				SendMessageToConsole(PlayerController, (L"No registered bot with ID " + std::to_wstring(BotId) + L".").c_str());
+		}
+		else if (Command == "despawnallbots")
+		{
+			const int RemovedCount = Bots::DespawnAllBots();
+			SendMessageToConsole(PlayerController,
+				(L"Despawned " + std::to_wstring(RemovedCount) + L" bot(s).").c_str());
 		}
 		else if (Command == "sethealth")
 		{
@@ -1062,7 +1492,17 @@ cheat spawnpickup <ShortWID> <ItemCount=1> <PickupCount=1> - Spawns a pickup at 
 cheat teleport/tp - Teleports to what the player is looking at.
 cheat savewaypoint (phrase/number) - Gets the location of where you are standing and saves it as a waypoint.
 cheat waypoint (saved phrase/number) - Teleports the player to the selected existing waypoint.
-cheat spawnbot <Amount=1> - Spawns a bot at the player (experimental).
+cheat spawnbot [count=1] [participant|practice] - Spawns tracked player bots. Defaults to Participant.
+cheat botlist - Lists registered bot IDs, types, states, names, and reference validity.
+cheat botstressspawn [count=10] - Spawns recorded Practice bots without damage or cleanup.
+cheat botstresskill - Applies lethal damage to recorded stress bots without explicit cleanup.
+cheat botstresscleanup - Explicitly cleans recorded stress bots without applying damage.
+cheat botstressstatus - Reports heartbeat, phase, lifecycle stages, flags, and safe reference validity.
+cheat botstressflags - Lists diagnostic feature flags.
+cheat botstressflag <name> <on|off> - Toggles one isolated lifecycle path.
+cheat botinfo <id> - Shows detailed registry and lifecycle information.
+cheat despawnbot <id> - Safely removes exactly one registered bot.
+cheat despawnallbots - Safely removes all registered bots.
 cheat setpickaxe <PickaxeID> - Set player's pickaxe. Can be either the PID or WID
 cheat destroytarget - Destroys the actor that the player is looking at.
 cheat wipequickbar <Primary|Secondary> <RemoveUndroppables=false> - Wipes the specified quickbar (parameters is not case sensitive).

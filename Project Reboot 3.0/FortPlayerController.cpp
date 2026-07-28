@@ -24,6 +24,7 @@
 #include "gui.h"
 #include "FortAthenaMutator_InventoryOverride.h"
 #include "FortAthenaMutator_TDM.h"
+#include "bot_registry.h"
 
 void AFortPlayerController::ClientReportDamagedResourceBuilding(ABuildingSMActor* BuildingSMActor, EFortResourceType PotentialResourceType, int PotentialResourceCount, bool bDestroyed, bool bJustHitWeakspot)
 {
@@ -1291,14 +1292,93 @@ DWORD WINAPI RestartThread(LPVOID)
 
 void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerController, void* DeathReport)
 {
-	auto GameState = Cast<AFortGameStateAthena>(((AFortGameMode*)GetWorld()->GetGameMode())->GetGameState());
+	Bots::EnterLifecycleDiagnosticStage(0, EBotLifecycleDiagnosticStage::DeathNotificationHook);
+	LOG_INFO(LogBots, "[BotLifecycle] Death notification received controller=0x{:x} report=0x{:x}.",
+		__int64(PlayerController), __int64(DeathReport));
+
+	if (!PlayerController || !DeathReport)
+	{
+		LOG_ERROR(LogBots, "[BotLifecycle] Death notification rejected because controller or report is null.");
+		Bots::CompleteLifecycleDiagnosticStage(0, EBotLifecycleDiagnosticStage::DeathNotificationHook);
+		return;
+	}
+
+	auto KnownBot = Bots::GetRegistry().FindByController(PlayerController);
+	const uint64 DiagnosticBotId = KnownBot ? KnownBot->BotId : 0;
+	Bots::EnterLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::DeathNotificationHook);
+	auto World = GetWorld();
+	auto FortGameMode = World ? (AFortGameMode*)World->GetGameMode() : nullptr;
+	auto GameState = FortGameMode ? Cast<AFortGameStateAthena>(FortGameMode->GetGameState()) : nullptr;
 	auto DeadPawn = Cast<AFortPlayerPawn>(PlayerController->GetPawn());
 	auto DeadPlayerState = Cast<AFortPlayerStateAthena>(PlayerController->GetPlayerState());
 	auto KillerPawn = Cast<AFortPlayerPawn>(*(AFortPawn**)(__int64(DeathReport) + MemberOffsets::DeathReport::KillerPawn));
 	auto KillerPlayerState = Cast<AFortPlayerStateAthena>(*(AFortPlayerState**)(__int64(DeathReport) + MemberOffsets::DeathReport::KillerPlayerState));
 
 	if (!DeadPawn || !GameState || !DeadPlayerState)
-		return ClientOnPawnDiedOriginal(PlayerController, DeathReport);
+	{
+		LOG_WARN(LogBots, "[BotLifecycle] Death notification has missing state (bot={} pawn={} gameState={} playerState={}).",
+			KnownBot.has_value(), DeadPawn != nullptr, GameState != nullptr, DeadPlayerState != nullptr);
+
+		if (KnownBot && (KnownBot->Type == EPlayerBotType::Practice ||
+			KnownBot->State != EPlayerBotLifecycleState::Alive ||
+			KnownBot->bDeathNotificationInProgress ||
+			KnownBot->bDeathNotificationHandled))
+		{
+			LOG_WARN(LogBots, "[BotLifecycle] Registered bot {} duplicate/legacy death handler suppressed because required references are unavailable.",
+				KnownBot->BotId);
+			Bots::CompleteLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::DeathNotificationHook);
+			return;
+		}
+
+		Bots::EnterLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::OriginalDeathHandler);
+		LOG_INFO(LogBots, "[BotLifecycle] Original death handler entry bot={} reason=missing-custom-state.",
+			DiagnosticBotId);
+		ClientOnPawnDiedOriginal(PlayerController, DeathReport);
+		LOG_INFO(LogBots, "[BotLifecycle] Original death handler exit bot={} reason=missing-custom-state.",
+			DiagnosticBotId);
+		Bots::CompleteLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::OriginalDeathHandler);
+		Bots::CompleteLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::DeathNotificationHook);
+		return;
+	}
+
+	bool bIsRespawningAllowed = GameState->IsRespawningAllowed(DeadPlayerState);
+	FPlayerBotRegistryEntry DeathBotEntry;
+	EBotDeathNotificationResult BotDeathResult = EBotDeathNotificationResult::NotRegistered;
+	bool bIsRegisteredBotDeath = false;
+	bool bIsPracticeBotDeath = false;
+
+	if (!bIsRespawningAllowed && !DeadPawn->IsDBNO())
+	{
+		BotDeathResult = Bots::GetRegistry().BeginDeathNotification(PlayerController, DeadPawn, &DeathBotEntry);
+
+		if (BotDeathResult == EBotDeathNotificationResult::Started)
+		{
+			bIsRegisteredBotDeath = true;
+			bIsPracticeBotDeath = DeathBotEntry.Type == EPlayerBotType::Practice;
+			LOG_INFO(LogBots, "[BotLifecycle] Registry lookup matched bot {} type={}; alive-to-dead transition started.",
+				DeathBotEntry.BotId, Bots::BotTypeToString(DeathBotEntry.Type));
+
+			if (bIsPracticeBotDeath)
+				Bots::CancelBotOwnedDeathTimers(DeathBotEntry.BotId, "Practice death notification");
+		}
+		else if (BotDeathResult == EBotDeathNotificationResult::DuplicateSuppressed)
+		{
+			LOG_WARN(LogBots, "[BotLifecycle] Duplicate death notification suppressed for bot {}.", DeathBotEntry.BotId);
+			Bots::CompleteLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::DeathNotificationHook);
+			return;
+		}
+		else if (BotDeathResult == EBotDeathNotificationResult::CleanupInProgress)
+		{
+			LOG_WARN(LogBots, "[BotLifecycle] Death notification suppressed for bot {} because cleanup is already pending.",
+				DeathBotEntry.BotId);
+			Bots::CompleteLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::DeathNotificationHook);
+			return;
+		}
+		else
+		{
+			LOG_INFO(LogBots, "[BotLifecycle] Registry lookup found no tracked bot; using the normal player death path.");
+		}
+	}
 
 	auto DeathLocation = DeadPawn->GetActorLocation();
 
@@ -1482,8 +1562,6 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 		}
 	}
 
-	bool bIsRespawningAllowed = GameState->IsRespawningAllowed(DeadPlayerState);
-
 	bool bDropInventory = true;
 
 	LoopMutators([&](AFortAthenaMutator* Mutator)
@@ -1591,7 +1669,20 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 						}
 					}
 
-					RemoveFromAlivePlayers(GameMode, PlayerController, KillerPlayerState == DeadPlayerState ? nullptr : KillerPlayerState, KillerPawn, KillerWeaponDef, DeathCause, 0);
+					if (Bots::ShouldRemoveFromAlivePlayersOnDeath(PlayerController))
+					{
+						// Participant bots and human players retain the original
+						// engine removal path and normal victory behavior.
+						RemoveFromAlivePlayers(GameMode, PlayerController, KillerPlayerState == DeadPlayerState ? nullptr : KillerPlayerState, KillerPawn, KillerWeaponDef, DeathCause, 0);
+						Bots::NotifyAlivePlayerTrackingRemoved(PlayerController);
+					}
+					else
+					{
+						// Fortnite 4.5 practice bots were never inserted into
+						// PlayersLeft/AlivePlayers, so invoking this function for
+						// them would incorrectly decrement the real match count.
+						LOG_INFO(LogBots, "[BotLifecycle] Practice bot death excluded from RemoveFromAlivePlayers.");
+					}
 
 					/*
 
@@ -1626,7 +1717,14 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 			}
 		}
 
-		if (Fortnite_Version < 6) // Spectating (is this the actual build or is it like 6.10 when they added it auto).
+		if (bIsPracticeBotDeath)
+		{
+			Bots::LogDeathTimerRegistration(PlayerController, DeadPawn, DeadPlayerState,
+				"SpectateOnDeath (suppressed)", 5.f);
+			LOG_INFO(LogBots, "[BotLifecycle] Spectator handling and fixed 5-second timer skipped for Practice bot {}.",
+				DeathBotEntry.BotId);
+		}
+		else if (Fortnite_Version < 6) // Spectating (is this the actual build or is it like 6.10 when they added it auto).
 		{
 			if (GameState->GetGamePhase() > EAthenaGamePhase::Warmup)
 			{
@@ -1637,22 +1735,25 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 
 				if (bAllowSpectate)
 				{
-					LOG_INFO(LogDev, "Starting Spectating!");
+					LOG_INFO(LogBots, "[BotLifecycle] Spectator handling scheduled for normal participant controller.");
 
 					static auto PlayerToSpectateOnDeathOffset = PlayerController->GetOffset("PlayerToSpectateOnDeath");
 					PlayerController->Get<APawn*>(PlayerToSpectateOnDeathOffset) = KillerPawn;
 
+					Bots::LogDeathTimerRegistration(PlayerController, DeadPawn, DeadPlayerState,
+						"SpectateOnDeath", 5.f);
 					UKismetSystemLibrary::K2_SetTimer(PlayerController, L"SpectateOnDeath", 5.f, false); // Soo proper its scary
 				}
 			}
 		}
 
-		if (Fortnite_Version >= 15) // dk if this is correct
+		if (!bIsPracticeBotDeath && Fortnite_Version >= 15) // dk if this is correct
 		{
+			LOG_INFO(LogBots, "[BotLifecycle] Controller state transitioning to Spectating.");
 			PlayerController->GetStateName() = UKismetStringLibrary::Conv_StringToName(L"Spectating");
 		}
 
-		if (IsRestartingSupported() && Globals::bAutoRestart && !bIsInAutoRestart)
+		if (!bIsPracticeBotDeath && IsRestartingSupported() && Globals::bAutoRestart && !bIsInAutoRestart)
 		{
 			// wht
 
@@ -1684,14 +1785,86 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 		}
 	}
 
-	if (DeadPlayerState->IsBot())
+	const auto StressFeatureFlags = Bots::GetBotStressFeatureFlags();
+	const bool bDiagnosticStressBot = Bots::IsRecordedBotStressId(DiagnosticBotId);
+	const bool bPlayerStateCleanupEnabled =
+		!bDiagnosticStressBot || StressFeatureFlags.bPlayerStateCleanup;
+	const bool bUnpossessEnabled =
+		!bDiagnosticStressBot || StressFeatureFlags.bUnpossess;
+	const bool bOriginalHandlerEnabled =
+		bDiagnosticStressBot && StressFeatureFlags.bOriginalFortniteDeathHandler;
+	Bots::EnterLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::PlayerStateHandling);
+	LOG_INFO(LogBots, "[BotLifecycle] Player-state handling entry bot={} operation=EndDBNOAbilities enabled={}.",
+		DiagnosticBotId, bPlayerStateCleanupEnabled);
+
+	if (bPlayerStateCleanupEnabled)
+		DeadPlayerState->EndDBNOAbilities();
+
+	LOG_INFO(LogBots, "[BotLifecycle] Player-state handling exit bot={} operation=EndDBNOAbilities enabled={}.",
+		DiagnosticBotId, bPlayerStateCleanupEnabled);
+	Bots::CompleteLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::PlayerStateHandling);
+
+	if (bIsPracticeBotDeath && PlayerController->GetPawn() == DeadPawn)
 	{
-		// AllPlayerBotsToTick.remov3lbah
+		Bots::EnterLifecycleDiagnosticStage(DeathBotEntry.BotId, EBotLifecycleDiagnosticStage::Unpossess);
+		LOG_INFO(LogBots, "[BotLifecycle] Unpossess entry bot={} source=death-hook enabled={}.",
+			DeathBotEntry.BotId, bUnpossessEnabled);
+
+		if (bUnpossessEnabled)
+			PlayerController->UnPossess();
+
+		LOG_INFO(LogBots, "[BotLifecycle] Unpossess exit bot={} source=death-hook enabled={}.",
+			DeathBotEntry.BotId, bUnpossessEnabled);
+		Bots::CompleteLifecycleDiagnosticStage(DeathBotEntry.BotId, EBotLifecycleDiagnosticStage::Unpossess);
 	}
 
-	DeadPlayerState->EndDBNOAbilities();
+	if (bIsRegisteredBotDeath)
+	{
+		Bots::GetRegistry().CompleteDeathNotification(DeathBotEntry.BotId);
+		LOG_INFO(LogBots, "[BotLifecycle] Death notification completed for bot {}.", DeathBotEntry.BotId);
+	}
 
-	return ClientOnPawnDiedOriginal(PlayerController, DeathReport);
+	if (bIsPracticeBotDeath)
+	{
+		Bots::EnterLifecycleDiagnosticStage(DeathBotEntry.BotId, EBotLifecycleDiagnosticStage::PracticeBypass);
+		LOG_INFO(LogBots, "[BotLifecycle] Practice bypass entry bot={} originalHandlerEnabled={}.",
+			DeathBotEntry.BotId, bOriginalHandlerEnabled);
+
+		// Practice controllers have no client connection to spectate through.
+		// Calling the legacy client death handler can schedule repeated controller
+		// transitions/timers, so the registry-owned path ends here. Repeat the
+		// cancellation after death-info/ability finalization in case either
+		// subsystem registered work during this hook. Callback guards remain the
+		// final defense for timers the surrounding engine function schedules
+		// after this call-site hook returns.
+		Bots::CancelBotOwnedDeathTimers(DeathBotEntry.BotId, "Practice death finalization");
+
+		if (!bOriginalHandlerEnabled)
+		{
+			LOG_INFO(LogBots, "[BotLifecycle] Legacy ClientOnPawnDied handler skipped for Practice bot {}.",
+				DeathBotEntry.BotId);
+			LOG_INFO(LogBots, "[BotLifecycle] Practice bypass exit bot={} bypassed=true.",
+				DeathBotEntry.BotId);
+			Bots::CompleteLifecycleDiagnosticStage(DeathBotEntry.BotId, EBotLifecycleDiagnosticStage::PracticeBypass);
+			Bots::CompleteLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::DeathNotificationHook);
+			return;
+		}
+
+		LOG_WARN(LogBots,
+			"[BotLifecycle] Practice bypass exit bot={} bypassed=false; original handler enabled for diagnostics.",
+			DeathBotEntry.BotId);
+		Bots::CompleteLifecycleDiagnosticStage(DeathBotEntry.BotId, EBotLifecycleDiagnosticStage::PracticeBypass);
+	}
+
+	Bots::EnterLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::OriginalDeathHandler);
+	LOG_INFO(LogBots, "[BotLifecycle] Original death handler entry bot={} practice={}.",
+		DiagnosticBotId, bIsPracticeBotDeath);
+	ClientOnPawnDiedOriginal(PlayerController, DeathReport);
+	LOG_INFO(LogBots, "[BotLifecycle] Original death handler exit bot={} practice={}.",
+		DiagnosticBotId, bIsPracticeBotDeath);
+	Bots::CompleteLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::OriginalDeathHandler);
+	Bots::CompleteLifecycleDiagnosticStage(DiagnosticBotId, EBotLifecycleDiagnosticStage::DeathNotificationHook);
+	return;
 }
 
 void AFortPlayerController::ServerBeginEditingBuildingActorHook(AFortPlayerController* PlayerController, ABuildingSMActor* BuildingActorToEdit)

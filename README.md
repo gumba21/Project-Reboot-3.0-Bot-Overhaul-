@@ -21,14 +21,43 @@ The original bot-spawn command works through Reboot's cheat-script interface:
 2. Press **F2** or **Fn + F2** to enable the cheat scripts.
 3. Use `spawnbot` after entering the match.
 
-The currently spawned early-version bot is effectively a fake player. It can spawn, receive a pawn, inventory, team, name, and cosmetic, but it does not yet navigate, search, fight, loot, build, or make meaningful decisions. Because it is registered as a living participant, killing it can also immediately satisfy the normal last-player-alive win condition.
+The bot foundation now tracks every successful player-bot spawn through a stable process-lifetime ID and safely validated Unreal object references. It supports two types:
+
+- **Participant** — behaves like the historical `spawnbot` fake player and counts in `PlayersLeft`/`AlivePlayers`, so its death retains normal Battle Royale victory behavior.
+- **Practice** — a training target that is deliberately excluded from `PlayersLeft`, `AlivePlayers`, and the death-time `RemoveFromAlivePlayers` call. Killing or removing it therefore cannot decrement the meaningful participant count.
+
+Available cheat-script commands:
+
+```text
+spawnbot [count=1] [participant|practice]
+botlist
+botstressspawn [count=10]
+botstresskill
+botstresscleanup
+botstressstatus
+botstressflags
+botstressflag <name> <on|off>
+botinfo <id>
+despawnbot <id>
+despawnallbots
+```
+
+`spawnbot` and numeric forms such as `spawnbot 3` remain backward compatible and default to Participant. `spawnbot practice` and `spawnbot participant` select a type explicitly.
+
+Stress testing is split into isolated operations. `botstressspawn` only creates and records Practice bot IDs. `botstresskill` applies lethal damage and lets the current Practice death hook run without explicit cleanup. `botstresscleanup` exercises explicit destruction/registry cleanup without applying damage. `botstressstatus` reports every recorded ID, safe reference validity, the active phase, and the last entered/completed lifecycle stage.
+
+While a stress session is active, a game-thread heartbeat logs once per second using only cached primitive diagnostic state. It does not walk UObject arrays, resolve bot pointers, or validate registry entries. Object validation happens only when `botstressstatus` is explicitly requested. `botstressflag <name> <on|off>` can isolate `originalhandler`, `unpossess`, `pawndestroy`, `controllerdestroy`, `playerstatecleanup`, `registryremoval`, and `invalidsweep`. Death and cleanup overrides apply only to recorded stress bots; `invalidsweep` controls the diagnostic scan itself while testing.
+
+For isolation, first run `botstressspawn 10` and wait. Then choose exactly one follow-up: use `botstresskill` to test the death hook, or use `botstresscleanup` to test explicit destruction without death. The final heartbeat line identifies the last stage entered and completed if the game thread stops.
+
+The current bots still do not navigate, search, fight, loot, build, or make meaningful decisions. Practice-bot participation handling is initially targeted at **Fortnite 4.5**; later engine versions and native Chapter 2 bot managers may maintain additional match counters and remain outside this foundation PR.
 
 ## Development priorities
 
 ### 1. Bot foundation
 
 - Safe bot registry and stable IDs
-- Correct spawn, death, despawn, and stale-pointer cleanup
+- Correct spawn, death, despawn, reset, shutdown, and stale-pointer cleanup
 - Practice bots that do not accidentally end the match
 - Participant bots that count toward normal victory conditions
 - Bot inspection and debugging commands

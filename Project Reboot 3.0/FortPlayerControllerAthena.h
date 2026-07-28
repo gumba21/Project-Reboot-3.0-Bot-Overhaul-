@@ -140,6 +140,9 @@ public:
 	static inline void (*EnterAircraftOriginal)(UObject* PC, AActor* Aircraft);
 	static inline void (*StartGhostModeOriginal)(UObject* Context, FFrame* Stack, void* Ret);
 	static inline void (*EndGhostModeOriginal)(AFortPlayerControllerAthena* PlayerController);
+	static inline void (*SpectateOnDeathOriginal)(UObject* Context, FFrame& Stack, void* Ret);
+	static inline void (*RespawnPlayerAfterDeathOriginal)(UObject* Context, FFrame& Stack, void* Ret);
+	static inline void (*ServerRestartPlayerCallbackOriginal)(UObject* Context, FFrame& Stack, void* Ret);
 
 	void SpectateOnDeath() // actually in zone
 	{
@@ -257,6 +260,9 @@ public:
 	static void EnterAircraftHook(UObject* PC, AActor* Aircraft);
 	static void ServerRequestSeatChangeHook(AFortPlayerControllerAthena* PlayerController, int TargetSeatIndex); // actually in zone
 	static void ServerRestartPlayerHook(AFortPlayerControllerAthena* Controller);
+	static void SpectateOnDeathHook(UObject* Context, FFrame& Stack, void* Ret);
+	static void RespawnPlayerAfterDeathHook(UObject* Context, FFrame& Stack, void* Ret);
+	static void ServerRestartPlayerCallbackHook(UObject* Context, FFrame& Stack, void* Ret);
 	static void ServerGiveCreativeItemHook(AFortPlayerControllerAthena* Controller, FFortItemEntry CreativeItem);
 	static void ServerTeleportToPlaygroundLobbyIslandHook(AFortPlayerControllerAthena* Controller);
 	static void ServerAcknowledgePossessionHook(APlayerController* Controller, APawn* Pawn);
