@@ -1,37 +1,101 @@
-## IMPORTANT: discord.gg/reboot is NOT us anymore!
-![image](https://github.com/user-attachments/assets/5704e635-31d9-417a-856f-91728f2be7f2)
+# Project Reboot 3.0 — Bot Overhaul
 
-# The reboot discord and my discord account has been terminated
-# New discord at discord.gg/rebootmp
-# Thanks for all the support over the past years.
+A community fork of [Project Reboot 3.0](https://github.com/Milxnor/Project-Reboot-3.0) focused on turning its experimental Fortnite bots into stable, useful, and eventually capable AI opponents.
 
-![Banner](https://i.imgur.com/p0P4tcI.png)
+> This fork is an independent development project. Credit for the original server implementation belongs to the Project Reboot contributors.
 
-Project Reboot is a tough battled and widely used game server for Fortnite.
+## Goal
 
-Below are the key points about this project:
+Project Reboot already contains two incomplete bot foundations:
 
-## Features
+- **Early-version player bots**, which create server-controlled player pawns but currently have almost no behavior.
+- **Chapter 2 native AI**, including guard, henchman, bot-manager, and customization scaffolding for supported later builds.
 
-1. **S3-S15 Support**: The project includes support for Fortnite seasons 5 through 12.
-2. **S1-S2 & S16-S19 Compatibility**: Seasons 1 and 2, and Season 16 through 19 might not work perfectly.
-3. **S20+ Branch**: We have an alternate branch if you really want to test S20. It is currently unstable though.
-4. **Rewrite and Improvements**: Project Reboot is a rewrite of the original Universal Walking Simulator. It's an ongoing effort to enhance and optimize the gameplay experience.
-5. **Lategame Enhancements**: Although still missing some features from the old project, lategame improvements are planned for the future.
+This fork will stabilize those systems, make them easier to test, and build a proper AI layer around them without breaking normal server behavior.
 
-## Installation
+## Current status
 
-1. Clone this repository: `git clone https://github.com/Milxnor/Project-Reboot-3.0.git`
-2. Build the project using your preferred build tools. (Use Visual Studio 2022)
-3. Run the server using the Reboot Launcher.
+The original bot-spawn command works through Reboot's cheat-script interface:
+
+1. Start and join the server.
+2. Press **F2** or **Fn + F2** to enable the cheat scripts.
+3. Use `spawnbot` after entering the match.
+
+The currently spawned early-version bot is effectively a fake player. It can spawn, receive a pawn, inventory, team, name, and cosmetic, but it does not yet navigate, search, fight, loot, build, or make meaningful decisions. Because it is registered as a living participant, killing it can also immediately satisfy the normal last-player-alive win condition.
+
+## Development priorities
+
+### 1. Bot foundation
+
+- Safe bot registry and stable IDs
+- Correct spawn, death, despawn, and stale-pointer cleanup
+- Practice bots that do not accidentally end the match
+- Participant bots that count toward normal victory conditions
+- Bot inspection and debugging commands
+- Clear development build identifiers and logging
+
+### 2. Movement and state machine
+
+- Budgeted bot tick scheduler
+- Idle, wander, investigate, engage, dead, and respawn states
+- Server-authoritative movement and rotation
+- Obstacle checks, jumping, stuck detection, and recovery
+
+### 3. Perception and combat
+
+- Team-aware target detection
+- Field of view, line of sight, reaction delay, and target memory
+- Weapon selection, aiming, firing, reloading, and disengaging
+
+### 4. Looting and survival
+
+- Pickup discovery and collection
+- Inventory and ammunition management
+- Healing and distance-based weapon choices
+- Storm and safe-zone movement
+
+### 5. Full match behavior
+
+- Warmup and Battle Bus flow
+- Jumping, gliding, landing, and rotations
+- Encounters, survival priorities, harvesting, and eventually building
+
+### 6. Chapter 2 native guards
+
+The guard and henchman work will remain version-specific and separate from the early-version player-bot implementation. The first target will be one known-good Chapter 2 build before expanding support.
+
+See [ROADMAP.md](ROADMAP.md) for the staged implementation plan.
+
+## Supported scope
+
+Project Reboot itself supports a broad range of legacy Fortnite versions, but bot behavior differs greatly by build. Development in this fork will use explicit version targets rather than claiming that every bot feature works everywhere.
+
+The initial custom player-bot work targets **Fortnite 4.5**. Native guard and henchman work will target a selected Chapter 2 version separately.
+
+## Building
+
+Requirements:
+
+- Visual Studio 2022
+- MSVC v143 toolset
+- Windows 10 or Windows 11 SDK
+- `Release | x64`
+
+Build the solution and load the resulting server DLL through Reboot Launcher. Development builds should display a unique build name or commit identifier so they cannot be confused with the stock `reboot.dll`.
+
+## Branch strategy
+
+- `master` — stable project baseline and documentation
+- `bot-foundation` — lifecycle, debugging, and practice-bot work
+- `bot-ai-4.5` — early-version custom player AI
+- `chapter2-guards` — native Chapter 2 AI experiments
+
+Major changes should be developed through draft pull requests rather than committed directly to `master`.
+
 ## Contributing
 
-Contributions are welcome! Feel free to create pull requests or report issues on the GitHub repository.
+Bug reports, reverse-engineering notes, version-specific findings, testing results, and focused pull requests are welcome. Reports should include the Fortnite build, launcher/server build, reproduction steps, and relevant logs.
 
 ## License
 
-This project is licensed under the BSD-3-Clause license.
-
----
-
-**Note**: Project Reboot is a work in progress, and further updates and enhancements are planned. Explore, experiment, and contribute to make it even better! 🚀
+This project retains the original BSD-3-Clause license. Existing third-party code and assets remain subject to their respective licenses and attribution requirements.
