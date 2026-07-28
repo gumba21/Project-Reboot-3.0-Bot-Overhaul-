@@ -910,6 +910,82 @@ void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 			for (const auto& Entry : Entries)
 				SendMessageToConsole(PlayerController, FormatBotSummary(Entry).c_str());
 		}
+		else if (Command == "botstresstest")
+		{
+			if (GameState->GetGamePhase() < EAthenaGamePhase::Aircraft)
+			{
+				SendMessageToConsole(PlayerController, L"Bot stress testing before aircraft is not allowed.");
+				return;
+			}
+
+			int Count = 10;
+
+			if (NumArgs >= 1)
+			{
+				try { Count = std::stoi(Arguments[1]); }
+				catch (...)
+				{
+					SendMessageToConsole(PlayerController, L"Usage: botstresstest [count=10]");
+					return;
+				}
+			}
+
+			if (Count < 10)
+			{
+				SendMessageToConsole(PlayerController, L"Stress tests require at least 10 Practice bots; using 10.");
+				Count = 10;
+			}
+
+			if (Count > 25)
+			{
+				SendMessageToConsole(PlayerController, L"Stress-test count is capped at 25.");
+				Count = 25;
+			}
+
+			auto SpawnOriginPawn = ReceivingController->GetPawn();
+
+			if (!SpawnOriginPawn)
+			{
+				SendMessageToConsole(PlayerController, L"No pawn to run the stress test at.");
+				return;
+			}
+
+			std::vector<uint64> SpawnedBotIds;
+			SpawnedBotIds.reserve(Count);
+			const auto Origin = SpawnOriginPawn->GetActorLocation();
+
+			for (int Index = 0; Index < Count; ++Index)
+			{
+				FTransform Transform;
+				Transform.Translation = Origin + FVector(
+					float((Index % 5) * 150),
+					float((Index / 5) * 150),
+					1000.f);
+				Transform.Scale3D = FVector(1, 1, 1);
+
+				auto SpawnResult = Bots::SpawnBotDetailed(Transform, SpawnOriginPawn, EPlayerBotType::Practice);
+
+				if (SpawnResult)
+					SpawnedBotIds.push_back(SpawnResult.BotId);
+			}
+
+			int KillRequests = 0;
+
+			// Iterate a stable ID snapshot. Death notifications may update the
+			// registry synchronously while ForceKill is processing.
+			for (const auto BotId : SpawnedBotIds)
+			{
+				if (Bots::ForceKillBotForStressTest(BotId, PlayerController))
+					++KillRequests;
+			}
+
+			LOG_INFO(LogBots, "[BotStress] Stress test requested {} spawns and {} kills; spawned={}.",
+				Count, KillRequests, SpawnedBotIds.size());
+			SendMessageToConsole(PlayerController,
+				(L"Bot stress test: spawned " + std::to_wstring(SpawnedBotIds.size()) +
+					L" Practice bots and requested " + std::to_wstring(KillRequests) +
+					L" kills. Use botlist to inspect the dead entries.").c_str());
+		}
 		else if (Command == "botinfo")
 		{
 			if (NumArgs < 1)
@@ -939,6 +1015,8 @@ void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 			SendMessageToConsole(PlayerController,
 				(L"age=" + std::to_wstring(Entry->GetSpawnAgeSeconds()) +
 					L"s aliveTracking=" + std::to_wstring(Entry->bCountedAsAliveParticipant) +
+					L" deathInProgress=" + std::to_wstring(Entry->bDeathNotificationInProgress) +
+					L" deathHandled=" + std::to_wstring(Entry->bDeathNotificationHandled) +
 					L" pendingCleanup=" + std::to_wstring(Entry->State == EPlayerBotLifecycleState::PendingCleanup) +
 					L" removed=" + std::to_wstring(Entry->State == EPlayerBotLifecycleState::Removed) +
 					L" inventoryValid=" + std::to_wstring(Entry->Inventory.IsValid()) + L".").c_str());
@@ -1216,6 +1294,7 @@ cheat savewaypoint (phrase/number) - Gets the location of where you are standing
 cheat waypoint (saved phrase/number) - Teleports the player to the selected existing waypoint.
 cheat spawnbot [count=1] [participant|practice] - Spawns tracked player bots. Defaults to Participant.
 cheat botlist - Lists registered bot IDs, types, states, names, and reference validity.
+cheat botstresstest [count=10] - Spawns and force-kills at least 10 Practice bots for lifecycle testing.
 cheat botinfo <id> - Shows detailed registry and lifecycle information.
 cheat despawnbot <id> - Safely removes exactly one registered bot.
 cheat despawnallbots - Safely removes all registered bots.

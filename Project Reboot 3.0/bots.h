@@ -4,6 +4,7 @@
 #include "OnlineReplStructs.h"
 #include "FortAthenaAIBotController.h"
 #include "BuildingContainer.h"
+#include "GameplayTagContainer.h"
 #include "botnames.h"
 #include "bot_registry.h"
 
@@ -452,6 +453,47 @@ namespace Bots
 			ForgetRuntimeBot(BotId);
 
 		return bCleaned;
+	}
+
+	inline bool ForceKillBotForStressTest(uint64 BotId, AController* KillerController)
+	{
+		auto Entry = GetRegistry().GetBot(BotId);
+
+		if (!Entry || Entry->Type != EPlayerBotType::Practice ||
+			Entry->State != EPlayerBotLifecycleState::Alive)
+		{
+			LOG_WARN(LogBots, "[BotStress] Bot {} is not an alive Practice bot.", BotId);
+			return false;
+		}
+
+		auto Pawn = Entry->Pawn.Resolve<AFortPlayerPawnAthena>();
+
+		if (!Pawn)
+		{
+			LOG_WARN(LogBots, "[BotStress] Bot {} has no valid pawn to kill.", BotId);
+			return false;
+		}
+
+		static auto ForceKillFn = FindObject<UFunction>(L"/Script/FortniteGame.FortPawn.ForceKill");
+
+		if (!ForceKillFn)
+		{
+			LOG_ERROR(LogBots, "[BotStress] FortPawn.ForceKill was not found.");
+			return false;
+		}
+
+		FGameplayTag DeathReason;
+		AActor* KillerActor = nullptr;
+		struct
+		{
+			FGameplayTag DeathReason;
+			AController* KillerController;
+			AActor* KillerActor;
+		} ForceKillParams{ DeathReason, KillerController, KillerActor };
+
+		LOG_INFO(LogBots, "[BotStress] Force-kill requested for Practice bot {}.", BotId);
+		Pawn->ProcessEvent(ForceKillFn, &ForceKillParams);
+		return true;
 	}
 
 	inline int DespawnAllBots(const char* Reason = "manual despawn all", bool bDestroyActors = true)

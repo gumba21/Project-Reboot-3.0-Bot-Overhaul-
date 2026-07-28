@@ -1292,14 +1292,75 @@ DWORD WINAPI RestartThread(LPVOID)
 
 void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerController, void* DeathReport)
 {
-	auto GameState = Cast<AFortGameStateAthena>(((AFortGameMode*)GetWorld()->GetGameMode())->GetGameState());
+	LOG_INFO(LogBots, "[BotLifecycle] Death notification received controller=0x{:x} report=0x{:x}.",
+		__int64(PlayerController), __int64(DeathReport));
+
+	if (!PlayerController || !DeathReport)
+	{
+		LOG_ERROR(LogBots, "[BotLifecycle] Death notification rejected because controller or report is null.");
+		return;
+	}
+
+	auto KnownBot = Bots::GetRegistry().FindByController(PlayerController);
+	auto World = GetWorld();
+	auto FortGameMode = World ? (AFortGameMode*)World->GetGameMode() : nullptr;
+	auto GameState = FortGameMode ? Cast<AFortGameStateAthena>(FortGameMode->GetGameState()) : nullptr;
 	auto DeadPawn = Cast<AFortPlayerPawn>(PlayerController->GetPawn());
 	auto DeadPlayerState = Cast<AFortPlayerStateAthena>(PlayerController->GetPlayerState());
 	auto KillerPawn = Cast<AFortPlayerPawn>(*(AFortPawn**)(__int64(DeathReport) + MemberOffsets::DeathReport::KillerPawn));
 	auto KillerPlayerState = Cast<AFortPlayerStateAthena>(*(AFortPlayerState**)(__int64(DeathReport) + MemberOffsets::DeathReport::KillerPlayerState));
 
 	if (!DeadPawn || !GameState || !DeadPlayerState)
+	{
+		LOG_WARN(LogBots, "[BotLifecycle] Death notification has missing state (bot={} pawn={} gameState={} playerState={}).",
+			KnownBot.has_value(), DeadPawn != nullptr, GameState != nullptr, DeadPlayerState != nullptr);
+
+		if (KnownBot && (KnownBot->Type == EPlayerBotType::Practice ||
+			KnownBot->State != EPlayerBotLifecycleState::Alive ||
+			KnownBot->bDeathNotificationInProgress ||
+			KnownBot->bDeathNotificationHandled))
+		{
+			LOG_WARN(LogBots, "[BotLifecycle] Registered bot {} duplicate/legacy death handler suppressed because required references are unavailable.",
+				KnownBot->BotId);
+			return;
+		}
+
 		return ClientOnPawnDiedOriginal(PlayerController, DeathReport);
+	}
+
+	bool bIsRespawningAllowed = GameState->IsRespawningAllowed(DeadPlayerState);
+	FPlayerBotRegistryEntry DeathBotEntry;
+	EBotDeathNotificationResult BotDeathResult = EBotDeathNotificationResult::NotRegistered;
+	bool bIsRegisteredBotDeath = false;
+	bool bIsPracticeBotDeath = false;
+
+	if (!bIsRespawningAllowed && !DeadPawn->IsDBNO())
+	{
+		BotDeathResult = Bots::GetRegistry().BeginDeathNotification(PlayerController, DeadPawn, &DeathBotEntry);
+
+		if (BotDeathResult == EBotDeathNotificationResult::Started)
+		{
+			bIsRegisteredBotDeath = true;
+			bIsPracticeBotDeath = DeathBotEntry.Type == EPlayerBotType::Practice;
+			LOG_INFO(LogBots, "[BotLifecycle] Registry lookup matched bot {} type={}; alive-to-dead transition started.",
+				DeathBotEntry.BotId, Bots::BotTypeToString(DeathBotEntry.Type));
+		}
+		else if (BotDeathResult == EBotDeathNotificationResult::DuplicateSuppressed)
+		{
+			LOG_WARN(LogBots, "[BotLifecycle] Duplicate death notification suppressed for bot {}.", DeathBotEntry.BotId);
+			return;
+		}
+		else if (BotDeathResult == EBotDeathNotificationResult::CleanupInProgress)
+		{
+			LOG_WARN(LogBots, "[BotLifecycle] Death notification suppressed for bot {} because cleanup is already pending.",
+				DeathBotEntry.BotId);
+			return;
+		}
+		else
+		{
+			LOG_INFO(LogBots, "[BotLifecycle] Registry lookup found no tracked bot; using the normal player death path.");
+		}
+	}
 
 	auto DeathLocation = DeadPawn->GetActorLocation();
 
@@ -1483,8 +1544,6 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 		}
 	}
 
-	bool bIsRespawningAllowed = GameState->IsRespawningAllowed(DeadPlayerState);
-
 	bool bDropInventory = true;
 
 	LoopMutators([&](AFortAthenaMutator* Mutator)
@@ -1566,8 +1625,6 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 
 		if (!DeadPawn->IsDBNO())
 		{
-			Bots::GetRegistry().MarkDead(PlayerController, DeadPawn);
-
 			if (bHandleDeath)
 			{
 				if (Fortnite_Version > 1.8 || Fortnite_Version == 1.11)
@@ -1642,7 +1699,11 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 			}
 		}
 
-		if (Fortnite_Version < 6) // Spectating (is this the actual build or is it like 6.10 when they added it auto).
+		if (bIsPracticeBotDeath)
+		{
+			LOG_INFO(LogBots, "[BotLifecycle] Spectator handling skipped for Practice bot {}.", DeathBotEntry.BotId);
+		}
+		else if (Fortnite_Version < 6) // Spectating (is this the actual build or is it like 6.10 when they added it auto).
 		{
 			if (GameState->GetGamePhase() > EAthenaGamePhase::Warmup)
 			{
@@ -1653,7 +1714,7 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 
 				if (bAllowSpectate)
 				{
-					LOG_INFO(LogDev, "Starting Spectating!");
+					LOG_INFO(LogBots, "[BotLifecycle] Spectator handling scheduled for normal participant controller.");
 
 					static auto PlayerToSpectateOnDeathOffset = PlayerController->GetOffset("PlayerToSpectateOnDeath");
 					PlayerController->Get<APawn*>(PlayerToSpectateOnDeathOffset) = KillerPawn;
@@ -1663,12 +1724,13 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 			}
 		}
 
-		if (Fortnite_Version >= 15) // dk if this is correct
+		if (!bIsPracticeBotDeath && Fortnite_Version >= 15) // dk if this is correct
 		{
+			LOG_INFO(LogBots, "[BotLifecycle] Controller state transitioning to Spectating.");
 			PlayerController->GetStateName() = UKismetStringLibrary::Conv_StringToName(L"Spectating");
 		}
 
-		if (IsRestartingSupported() && Globals::bAutoRestart && !bIsInAutoRestart)
+		if (!bIsPracticeBotDeath && IsRestartingSupported() && Globals::bAutoRestart && !bIsInAutoRestart)
 		{
 			// wht
 
@@ -1702,6 +1764,29 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 
 	DeadPlayerState->EndDBNOAbilities();
 
+	if (bIsPracticeBotDeath && PlayerController->GetPawn() == DeadPawn)
+	{
+		LOG_INFO(LogBots, "[BotLifecycle] Practice bot {} controller detaching from dead pawn.", DeathBotEntry.BotId);
+		PlayerController->UnPossess();
+	}
+
+	if (bIsRegisteredBotDeath)
+	{
+		Bots::GetRegistry().CompleteDeathNotification(DeathBotEntry.BotId);
+		LOG_INFO(LogBots, "[BotLifecycle] Death notification completed for bot {}.", DeathBotEntry.BotId);
+	}
+
+	if (bIsPracticeBotDeath)
+	{
+		// Practice controllers have no client connection to spectate through.
+		// Calling the legacy client death handler can schedule repeated controller
+		// transitions/timers, so the registry-owned path ends here.
+		LOG_INFO(LogBots, "[BotLifecycle] Legacy ClientOnPawnDied handler skipped for Practice bot {}.",
+			DeathBotEntry.BotId);
+		return;
+	}
+
+	LOG_INFO(LogBots, "[BotLifecycle] Continuing through legacy ClientOnPawnDied handler.");
 	return ClientOnPawnDiedOriginal(PlayerController, DeathReport);
 }
 

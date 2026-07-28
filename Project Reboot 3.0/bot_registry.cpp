@@ -137,7 +137,8 @@ size_t FPlayerBotRegistry::Num()
 	return Entries.size();
 }
 
-bool FPlayerBotRegistry::MarkDead(AController* Controller, APawn* Pawn)
+EBotDeathNotificationResult FPlayerBotRegistry::BeginDeathNotification(AController* Controller,
+	APawn* Pawn, FPlayerBotRegistryEntry* OutEntry)
 {
 	auto It = FindControllerIterator(Controller);
 
@@ -145,18 +146,44 @@ bool FPlayerBotRegistry::MarkDead(AController* Controller, APawn* Pawn)
 		It = FindPawnIterator(Pawn);
 
 	if (It == Entries.end())
-		return false;
+		return EBotDeathNotificationResult::NotRegistered;
 
-	if (It->State == EPlayerBotLifecycleState::Dead ||
-		It->State == EPlayerBotLifecycleState::PendingCleanup ||
+	if (OutEntry)
+		*OutEntry = *It;
+
+	if (It->State == EPlayerBotLifecycleState::PendingCleanup ||
 		It->State == EPlayerBotLifecycleState::Removed)
 	{
-		return true;
+		return EBotDeathNotificationResult::CleanupInProgress;
 	}
 
+	if (It->State == EPlayerBotLifecycleState::Dead ||
+		It->bDeathNotificationInProgress ||
+		It->bDeathNotificationHandled)
+	{
+		return EBotDeathNotificationResult::DuplicateSuppressed;
+	}
+
+	It->bDeathNotificationInProgress = true;
 	It->State = EPlayerBotLifecycleState::Dead;
+
+	if (OutEntry)
+		*OutEntry = *It;
+
 	LOG_INFO(LogBots, "[BotLifecycle] Death observed for bot {} type={}.",
 		It->BotId, Bots::BotTypeToString(It->Type));
+	return EBotDeathNotificationResult::Started;
+}
+
+bool FPlayerBotRegistry::CompleteDeathNotification(uint64 BotId)
+{
+	auto It = FindIterator(BotId);
+
+	if (It == Entries.end())
+		return WasRemoved(BotId);
+
+	It->bDeathNotificationInProgress = false;
+	It->bDeathNotificationHandled = true;
 	return true;
 }
 
@@ -182,18 +209,29 @@ bool FPlayerBotRegistry::MarkAliveTrackingRemoved(AController* Controller)
 	return true;
 }
 
-bool FPlayerBotRegistry::MarkPendingCleanup(uint64 BotId)
+EBotCleanupStartResult FPlayerBotRegistry::BeginCleanup(uint64 BotId)
 {
+	if (WasRemoved(BotId))
+		return EBotCleanupStartResult::AlreadyRemoved;
+
 	auto It = FindIterator(BotId);
 
 	if (It == Entries.end())
-		return false;
+		return EBotCleanupStartResult::NotFound;
 
 	if (It->State == EPlayerBotLifecycleState::Removed)
-		return true;
+		return EBotCleanupStartResult::AlreadyRemoved;
+
+	if (It->State == EPlayerBotLifecycleState::PendingCleanup)
+		return EBotCleanupStartResult::AlreadyPending;
 
 	It->State = EPlayerBotLifecycleState::PendingCleanup;
-	return true;
+	return EBotCleanupStartResult::Started;
+}
+
+bool FPlayerBotRegistry::WasRemoved(uint64 BotId) const
+{
+	return RemovedBotIds.contains(BotId);
 }
 
 bool FPlayerBotRegistry::RemoveEntry(uint64 BotId)
@@ -208,6 +246,7 @@ bool FPlayerBotRegistry::RemoveEntry(uint64 BotId)
 	It->Pawn.Reset();
 	It->PlayerState.Reset();
 	It->Inventory.Reset();
+	RemovedBotIds.insert(BotId);
 
 	Entries.erase(std::remove_if(Entries.begin(), Entries.end(), [BotId](const FPlayerBotRegistryEntry& Entry) {
 		return Entry.BotId == BotId;
@@ -244,7 +283,8 @@ std::vector<uint64> FPlayerBotRegistry::CollectInvalidAliveBotIds()
 		// explicit cleanup or reset. Alive entries cannot safely keep ticking.
 		if (Entry.State == EPlayerBotLifecycleState::Alive)
 		{
-			Entry.State = EPlayerBotLifecycleState::PendingCleanup;
+			// Do not mutate into PendingCleanup while iterating. The caller
+			// consumes this stable ID snapshot and begins cleanup afterward.
 			InvalidBotIds.push_back(Entry.BotId);
 		}
 	}
@@ -264,6 +304,7 @@ void FPlayerBotRegistry::InvalidateAndClear(const char* Reason, bool bLog)
 		Entry.Pawn.Reset();
 		Entry.PlayerState.Reset();
 		Entry.Inventory.Reset();
+		RemovedBotIds.insert(Entry.BotId);
 	}
 
 	Entries.clear();
@@ -447,16 +488,38 @@ namespace Bots
 
 	bool CleanupRegisteredBot(uint64 BotId, const char* Reason, bool bDestroyActors)
 	{
+		LOG_INFO(LogBots, "[BotLifecycle] Cleanup request received for bot {} reason={}.", BotId, Reason);
+
+		const auto CleanupStart = GetRegistry().BeginCleanup(BotId);
+
+		if (CleanupStart == EBotCleanupStartResult::AlreadyPending)
+		{
+			LOG_WARN(LogBots, "[BotLifecycle] Duplicate cleanup suppressed for bot {} (already pending).", BotId);
+			return true;
+		}
+
+		if (CleanupStart == EBotCleanupStartResult::AlreadyRemoved)
+		{
+			LOG_WARN(LogBots, "[BotLifecycle] Duplicate cleanup suppressed for bot {} (already removed).", BotId);
+			return true;
+		}
+
+		if (CleanupStart == EBotCleanupStartResult::NotFound)
+		{
+			LOG_WARN(LogBots, "[BotLifecycle] Cleanup lookup found no bot with ID {}.", BotId);
+			return false;
+		}
+
 		auto Entry = GetRegistry().GetBot(BotId);
 
 		if (!Entry)
+		{
+			LOG_ERROR(LogBots, "[BotLifecycle] Bot {} disappeared after cleanup began; suppressing duplicate work.", BotId);
 			return false;
+		}
 
-		if (Entry->State == EPlayerBotLifecycleState::Removed)
-			return true;
-
-		GetRegistry().MarkPendingCleanup(BotId);
-		LOG_INFO(LogBots, "[BotLifecycle] Cleanup requested for bot {} reason={}.", BotId, Reason);
+		LOG_INFO(LogBots, "[BotLifecycle] Cleanup registry lookup succeeded for bot {} type={} state={}.",
+			BotId, BotTypeToString(Entry->Type), BotStateToString(Entry->State));
 
 		if (Entry->bCountedAsAliveParticipant)
 			RemoveParticipantTrackingForManualDespawn(*Entry);
@@ -471,19 +534,34 @@ namespace Bots
 			if (Controller && Pawn && Controller->GetPawn() == Pawn)
 				Controller->UnPossess();
 
+			LOG_INFO(LogBots, "[BotLifecycle] Bot {} inventory destruction: valid={}.", BotId, Inventory != nullptr);
 			DestroyActorIfValid(Inventory);
+
+			LOG_INFO(LogBots, "[BotLifecycle] Bot {} pawn destruction: valid={}.", BotId, Pawn != nullptr);
 			DestroyActorIfValid(Pawn);
+
+			LOG_INFO(LogBots, "[BotLifecycle] Bot {} controller destruction: valid={}.", BotId, Controller != nullptr);
 			DestroyActorIfValid(Controller);
-			DestroyActorIfValid(PlayerStateReference.Resolve<AFortPlayerStateAthena>());
+
+			auto PlayerState = PlayerStateReference.Resolve<AFortPlayerStateAthena>();
+			LOG_INFO(LogBots, "[BotLifecycle] Bot {} player state cleanup: valid={}.", BotId, PlayerState != nullptr);
+			DestroyActorIfValid(PlayerState);
+		}
+		else
+		{
+			LOG_INFO(LogBots, "[BotLifecycle] Bot {} UObject destruction skipped for shutdown-safe invalidation.", BotId);
 		}
 
 		const bool bRemoved = GetRegistry().RemoveEntry(BotId);
 
 		if (bRemoved)
-			LOG_INFO(LogBots, "[BotLifecycle] Cleanup completed for bot {}.", BotId);
+			LOG_INFO(LogBots, "[BotLifecycle] Registry removal completed for bot {}.", BotId);
 		else
-			LOG_ERROR(LogBots, "[BotLifecycle] Cleanup failed to remove registry entry for bot {}.", BotId);
+			LOG_ERROR(LogBots, "[BotLifecycle] Registry removal failed for bot {}.", BotId);
 
-		return bRemoved;
+		if (!bRemoved)
+			return false;
+
+		return true;
 	}
 }

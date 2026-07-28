@@ -27,6 +27,7 @@ Planned commands:
 ```text
 spawnbot [count=1] [participant|practice]
 botlist
+botstresstest [count=10]
 botinfo <id>
 despawnbot <id>
 despawnallbots

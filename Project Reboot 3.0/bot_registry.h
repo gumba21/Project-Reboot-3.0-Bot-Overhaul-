@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 class AController;
@@ -28,6 +29,22 @@ enum class EPlayerBotLifecycleState : uint8
 	Dead,
 	PendingCleanup,
 	Removed,
+};
+
+enum class EBotDeathNotificationResult : uint8
+{
+	NotRegistered,
+	Started,
+	DuplicateSuppressed,
+	CleanupInProgress,
+};
+
+enum class EBotCleanupStartResult : uint8
+{
+	Started,
+	AlreadyPending,
+	AlreadyRemoved,
+	NotFound,
 };
 
 // A raw UObject address is not enough: Unreal may recycle the same object slot.
@@ -73,6 +90,8 @@ struct FPlayerBotRegistryEntry
 	bool bReferencesValid = true;
 	bool bCountedAsAliveParticipant = false;
 	bool bInvalidReferenceLogged = false;
+	bool bDeathNotificationInProgress = false;
+	bool bDeathNotificationHandled = false;
 
 	double GetSpawnAgeSeconds() const;
 	bool HasRequiredReferences() const;
@@ -90,10 +109,13 @@ public:
 	std::vector<FPlayerBotRegistryEntry> GetBots();
 	size_t Num();
 
-	bool MarkDead(AController* Controller, APawn* Pawn);
+	EBotDeathNotificationResult BeginDeathNotification(AController* Controller, APawn* Pawn,
+		FPlayerBotRegistryEntry* OutEntry = nullptr);
+	bool CompleteDeathNotification(uint64 BotId);
 	bool MarkAliveTrackingAdded(uint64 BotId);
 	bool MarkAliveTrackingRemoved(AController* Controller);
-	bool MarkPendingCleanup(uint64 BotId);
+	EBotCleanupStartResult BeginCleanup(uint64 BotId);
+	bool WasRemoved(uint64 BotId) const;
 	bool RemoveEntry(uint64 BotId);
 	std::vector<uint64> CollectInvalidAliveBotIds();
 	void InvalidateAndClear(const char* Reason, bool bLog = true);
@@ -104,6 +126,7 @@ private:
 	std::vector<FPlayerBotRegistryEntry>::iterator FindPawnIterator(APawn* Pawn);
 
 	std::vector<FPlayerBotRegistryEntry> Entries;
+	std::unordered_set<uint64> RemovedBotIds;
 	uint64 NextBotId = 1;
 };
 
