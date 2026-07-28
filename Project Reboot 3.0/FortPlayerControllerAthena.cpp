@@ -32,10 +32,14 @@ namespace
 		}
 
 		if (Original)
+		{
 			Original(Context, Stack, Ret);
+		}
 		else
+		{
 			LOG_ERROR(LogBots, "[BotLifecycle] Callback {} has no original handler; normal path could not continue.",
 				CallbackName);
+		}
 
 		Bots::LogDelayedDeathCallbackExit(BotId, CallbackName, false);
 	}

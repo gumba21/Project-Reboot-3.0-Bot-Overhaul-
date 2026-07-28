@@ -1371,12 +1371,18 @@ DWORD WINAPI Main(LPVOID)
                 (PVOID*)&AFortPlayerControllerAthena::ServerRestartPlayerCallbackOriginal, false, true);
 
             if (bHooked)
+            {
                 LOG_INFO(LogBots, "[BotLifecycle] Installed delayed callback guard for ServerRestartPlayer.");
+            }
             else
+            {
                 LOG_ERROR(LogBots, "[BotLifecycle] Failed to install delayed callback guard for ServerRestartPlayer.");
+            }
         }
         else
+        {
             LOG_WARN(LogBots, "[BotLifecycle] ServerRestartPlayer callback guard was not installed because the UFunction was not found.");
+        }
     }
 
     auto SpectateOnDeathFn = FindObject<UFunction>(L"/Script/FortniteGame.FortPlayerControllerZone.SpectateOnDeath");
@@ -1395,12 +1401,18 @@ DWORD WINAPI Main(LPVOID)
             (PVOID*)&AFortPlayerControllerAthena::SpectateOnDeathOriginal, false, true);
 
         if (bHooked)
+        {
             LOG_INFO(LogBots, "[BotLifecycle] Installed delayed callback guard for SpectateOnDeath (known Fortnite 4.5 delay=5.00s).");
+        }
         else
+        {
             LOG_ERROR(LogBots, "[BotLifecycle] Failed to install delayed callback guard for SpectateOnDeath.");
+        }
     }
     else
+    {
         LOG_WARN(LogBots, "[BotLifecycle] SpectateOnDeath callback guard was not installed because the UFunction or default object was not found.");
+    }
 
     auto RespawnPlayerAfterDeathFn =
         FindObject<UFunction>(L"/Script/FortniteGame.FortPlayerControllerAthena.RespawnPlayerAfterDeath");
@@ -1412,12 +1424,18 @@ DWORD WINAPI Main(LPVOID)
             (PVOID*)&AFortPlayerControllerAthena::RespawnPlayerAfterDeathOriginal, false, true);
 
         if (bHooked)
+        {
             LOG_INFO(LogBots, "[BotLifecycle] Installed delayed callback guard for RespawnPlayerAfterDeath.");
+        }
         else
+        {
             LOG_ERROR(LogBots, "[BotLifecycle] Failed to install delayed callback guard for RespawnPlayerAfterDeath.");
+        }
     }
     else
+    {
         LOG_WARN(LogBots, "[BotLifecycle] RespawnPlayerAfterDeath callback guard was not installed because the UFunction was not found.");
+    }
 
     auto OnRep_EditActorFn = FindObject<UFunction>(L"/Script/FortniteGame.FortWeap_EditingTool.OnRep_EditActor");
 

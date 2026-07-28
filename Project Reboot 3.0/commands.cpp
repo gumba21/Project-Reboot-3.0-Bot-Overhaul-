@@ -957,10 +957,10 @@ void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 			for (int Index = 0; Index < Count; ++Index)
 			{
 				FTransform Transform;
-				Transform.Translation = Origin + FVector(
-					float((Index % 5) * 150),
-					float((Index / 5) * 150),
-					1000.f);
+				Transform.Translation = FVector(
+					Origin.X + float((Index % 5) * 150),
+					Origin.Y + float((Index / 5) * 150),
+					Origin.Z + 1000.f);
 				Transform.Scale3D = FVector(1, 1, 1);
 
 				auto SpawnResult = Bots::SpawnBotDetailed(Transform, SpawnOriginPawn, EPlayerBotType::Practice);

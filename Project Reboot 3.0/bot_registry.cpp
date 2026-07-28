@@ -322,7 +322,9 @@ std::vector<uint64> FPlayerBotRegistry::CollectInvalidAliveBotIds()
 void FPlayerBotRegistry::InvalidateAndClear(const char* Reason, bool bLog)
 {
 	if (bLog)
+	{
 		LOG_INFO(LogBots, "[BotLifecycle] Invalidating {} registry entries during {}.", Entries.size(), Reason);
+	}
 
 	for (auto& Entry : Entries)
 	{
@@ -720,13 +722,14 @@ namespace Bots
 		const bool bRemoved = GetRegistry().RemoveEntry(BotId);
 
 		if (bRemoved)
+		{
 			LOG_INFO(LogBots, "[BotLifecycle] Registry removal completed for bot {}.", BotId);
+		}
 		else
+		{
 			LOG_ERROR(LogBots, "[BotLifecycle] Registry removal failed for bot {}.", BotId);
+		}
 
-		if (!bRemoved)
-			return false;
-
-		return true;
+		return bRemoved;
 	}
 }
