@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 class AController;
@@ -73,6 +74,7 @@ struct FSafeBotObjectReference
 	}
 
 	bool IsValid() const { return Resolve<UObject>() != nullptr; }
+	bool Matches(UObject* Candidate) const;
 	void Reset();
 };
 
@@ -106,6 +108,7 @@ public:
 	std::optional<FPlayerBotRegistryEntry> GetBot(uint64 BotId);
 	std::optional<FPlayerBotRegistryEntry> FindByController(AController* Controller);
 	std::optional<FPlayerBotRegistryEntry> FindByPawn(APawn* Pawn);
+	std::optional<uint64> FindStableBotIdByController(AController* Controller);
 	std::vector<FPlayerBotRegistryEntry> GetBots();
 	size_t Num();
 
@@ -126,6 +129,7 @@ private:
 	std::vector<FPlayerBotRegistryEntry>::iterator FindPawnIterator(APawn* Pawn);
 
 	std::vector<FPlayerBotRegistryEntry> Entries;
+	std::vector<std::pair<uint64, FSafeBotObjectReference>> RetiredControllerIds;
 	std::unordered_set<uint64> RemovedBotIds;
 	uint64 NextBotId = 1;
 };
@@ -141,6 +145,13 @@ namespace Bots
 	bool AddBotToAlivePlayerTracking(uint64 BotId);
 	bool ShouldRemoveFromAlivePlayersOnDeath(AController* Controller);
 	void NotifyAlivePlayerTrackingRemoved(AController* Controller);
+
+	void LogDeathTimerRegistration(AController* Controller, APawn* Pawn, UObject* PlayerState,
+		const char* CallbackName, float DelaySeconds);
+	bool CancelBotOwnedDeathTimers(uint64 BotId, const char* Reason);
+	bool ShouldSuppressDelayedDeathCallback(AController* Controller, const char* CallbackName,
+		uint64* OutBotId = nullptr);
+	void LogDelayedDeathCallbackExit(uint64 BotId, const char* CallbackName, bool bSuppressed);
 
 	bool CleanupRegisteredBot(uint64 BotId, const char* Reason, bool bDestroyActors = true);
 }

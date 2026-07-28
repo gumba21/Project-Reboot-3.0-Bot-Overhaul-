@@ -32,6 +32,7 @@ Available cheat-script commands:
 spawnbot [count=1] [participant|practice]
 botlist
 botstresstest [count=10]
+botstressstatus
 botinfo <id>
 despawnbot <id>
 despawnallbots
@@ -39,7 +40,7 @@ despawnallbots
 
 `spawnbot` and numeric forms such as `spawnbot 3` remain backward compatible and default to Participant. `spawnbot practice` and `spawnbot participant` select a type explicitly.
 
-`botstresstest` spawns and force-kills 10–25 Practice bots from a stable ID snapshot. It is a development diagnostic for repeated death-notification and lifecycle testing; use `botlist` afterward to inspect the retained dead entries.
+`botstresstest` spawns and force-kills 10–25 Practice bots from a stable ID snapshot. It starts a pointer-free 15-second watchdog. After at least 15 seconds, run `botstressstatus`; a PASS confirms that the network tick still advanced, the command path responded, and every test bot is a completed dead Practice registry entry. Use `botlist` afterward to inspect the retained dead entries.
 
 The current bots still do not navigate, search, fight, loot, build, or make meaningful decisions. Practice-bot participation handling is initially targeted at **Fortnite 4.5**; later engine versions and native Chapter 2 bot managers may maintain additional match counters and remain outside this foundation PR.
 

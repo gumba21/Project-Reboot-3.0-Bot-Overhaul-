@@ -414,6 +414,125 @@ namespace Bots
 		explicit operator bool() const { return BotId != 0 && Controller != nullptr; }
 	};
 
+	struct FBotStressTestState
+	{
+		bool bActive = false;
+		bool bNetworkTickObservedAfterDeadline = false;
+		bool bCommandProbeObservedAfterDeadline = false;
+		bool bRegistryStateValid = false;
+		int RequestedCount = 0;
+		int KillRequests = 0;
+		std::chrono::steady_clock::time_point StartTime;
+		std::vector<uint64> BotIds;
+	};
+
+	inline FBotStressTestState BotStressTestState;
+
+	inline double GetBotStressTestAgeSeconds()
+	{
+		if (!BotStressTestState.bActive)
+			return 0.0;
+
+		return std::chrono::duration<double>(
+			std::chrono::steady_clock::now() - BotStressTestState.StartTime).count();
+	}
+
+	inline bool ValidateBotStressRegistryState()
+	{
+		if (!BotStressTestState.bActive ||
+			BotStressTestState.BotIds.size() != (size_t)BotStressTestState.RequestedCount ||
+			BotStressTestState.KillRequests != BotStressTestState.RequestedCount)
+		{
+			return false;
+		}
+
+		for (const auto BotId : BotStressTestState.BotIds)
+		{
+			auto Entry = GetRegistry().GetBot(BotId);
+
+			if (!Entry || Entry->Type != EPlayerBotType::Practice ||
+				Entry->State != EPlayerBotLifecycleState::Dead ||
+				Entry->bDeathNotificationInProgress ||
+				!Entry->bDeathNotificationHandled)
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	inline void BeginBotStressTestWatchdog(int RequestedCount, int KillRequests,
+		const std::vector<uint64>& BotIds)
+	{
+		BotStressTestState = {};
+		BotStressTestState.bActive = true;
+		BotStressTestState.RequestedCount = RequestedCount;
+		BotStressTestState.KillRequests = KillRequests;
+		BotStressTestState.StartTime = std::chrono::steady_clock::now();
+		BotStressTestState.BotIds = BotIds;
+
+		LOG_INFO(LogBots,
+			"[BotStress] 15-second watchdog started requested={} spawned={} killRequests={}; no UObject pointers retained.",
+			RequestedCount, BotIds.size(), KillRequests);
+	}
+
+	inline void TickBotStressTestWatchdog(bool bFromNetworkTick)
+	{
+		if (!BotStressTestState.bActive || !bFromNetworkTick ||
+			BotStressTestState.bNetworkTickObservedAfterDeadline ||
+			GetBotStressTestAgeSeconds() < 15.0)
+		{
+			return;
+		}
+
+		BotStressTestState.bNetworkTickObservedAfterDeadline = true;
+		BotStressTestState.bRegistryStateValid = ValidateBotStressRegistryState();
+
+		LOG_INFO(LogBots,
+			"[BotStress] 15-second network watchdog completed age={:.2f}s registryValid={} bots={}.",
+			GetBotStressTestAgeSeconds(), BotStressTestState.bRegistryStateValid,
+			BotStressTestState.BotIds.size());
+	}
+
+	inline std::wstring ProbeBotStressTestStatus()
+	{
+		if (!BotStressTestState.bActive)
+			return L"No bot stress test is active.";
+
+		const double AgeSeconds = GetBotStressTestAgeSeconds();
+
+		if (AgeSeconds < 15.0)
+		{
+			return L"Bot stress test waiting: age=" +
+				std::to_wstring((int)AgeSeconds) + L"s; run botstressstatus after 15 seconds.";
+		}
+
+		// Reaching this command after the deadline is the command-path liveness
+		// probe. The network-tick flag must have been set independently.
+		BotStressTestState.bCommandProbeObservedAfterDeadline = true;
+		BotStressTestState.bRegistryStateValid = ValidateBotStressRegistryState();
+		const bool bPassed =
+			BotStressTestState.bNetworkTickObservedAfterDeadline &&
+			BotStressTestState.bCommandProbeObservedAfterDeadline &&
+			BotStressTestState.bRegistryStateValid;
+
+		LOG_INFO(LogBots,
+			"[BotStress] Command probe completed age={:.2f}s networkResponsive={} commandResponsive=true registryValid={} result={}.",
+			AgeSeconds, BotStressTestState.bNetworkTickObservedAfterDeadline,
+			BotStressTestState.bRegistryStateValid, bPassed ? "PASS" : "FAIL");
+
+		return std::wstring(L"Bot stress test ") + (bPassed ? L"PASS" : L"FAIL") +
+			L": age=" + std::to_wstring((int)AgeSeconds) +
+			L"s network=" + (BotStressTestState.bNetworkTickObservedAfterDeadline ? L"responsive" : L"not observed") +
+			L" commands=responsive registry=" + (BotStressTestState.bRegistryStateValid ? L"valid" : L"invalid") + L".";
+	}
+
+	inline void ResetBotStressTestWatchdog()
+	{
+		BotStressTestState = {};
+	}
+
 	inline void ForgetRuntimeBot(uint64 BotId)
 	{
 		AllPlayerBotsToTick.erase(std::remove_if(AllPlayerBotsToTick.begin(), AllPlayerBotsToTick.end(), [BotId](const PlayerBot& Bot) {
@@ -514,8 +633,9 @@ namespace Bots
 		return RemovedCount;
 	}
 
-	inline void SweepInvalidBots()
+	inline void SweepInvalidBots(bool bFromNetworkTick = false)
 	{
+		TickBotStressTestWatchdog(bFromNetworkTick);
 		const auto InvalidBotIds = GetRegistry().CollectInvalidAliveBotIds();
 
 		for (const auto BotId : InvalidBotIds)
@@ -525,6 +645,7 @@ namespace Bots
 	inline void HandleMatchReset(const char* Reason)
 	{
 		LOG_INFO(LogBots, "[BotLifecycle] Match reset cleanup requested: {}.", Reason);
+		ResetBotStressTestWatchdog();
 		const int RemovedCount = DespawnAllBots(Reason);
 		LOG_INFO(LogBots, "[BotLifecycle] Match reset cleanup removed {} bots.", RemovedCount);
 	}
@@ -548,6 +669,8 @@ namespace Bots
 
 	inline void Shutdown(bool bDestroyActors)
 	{
+		ResetBotStressTestWatchdog();
+
 		if (bDestroyActors)
 			DespawnAllBots("bot-system shutdown");
 		else

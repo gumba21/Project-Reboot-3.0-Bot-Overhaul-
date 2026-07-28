@@ -28,6 +28,7 @@ Planned commands:
 spawnbot [count=1] [participant|practice]
 botlist
 botstresstest [count=10]
+botstressstatus
 botinfo <id>
 despawnbot <id>
 despawnallbots

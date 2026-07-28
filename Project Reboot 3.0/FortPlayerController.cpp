@@ -1344,6 +1344,9 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 			bIsPracticeBotDeath = DeathBotEntry.Type == EPlayerBotType::Practice;
 			LOG_INFO(LogBots, "[BotLifecycle] Registry lookup matched bot {} type={}; alive-to-dead transition started.",
 				DeathBotEntry.BotId, Bots::BotTypeToString(DeathBotEntry.Type));
+
+			if (bIsPracticeBotDeath)
+				Bots::CancelBotOwnedDeathTimers(DeathBotEntry.BotId, "Practice death notification");
 		}
 		else if (BotDeathResult == EBotDeathNotificationResult::DuplicateSuppressed)
 		{
@@ -1701,7 +1704,10 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 
 		if (bIsPracticeBotDeath)
 		{
-			LOG_INFO(LogBots, "[BotLifecycle] Spectator handling skipped for Practice bot {}.", DeathBotEntry.BotId);
+			Bots::LogDeathTimerRegistration(PlayerController, DeadPawn, DeadPlayerState,
+				"SpectateOnDeath (suppressed)", 5.f);
+			LOG_INFO(LogBots, "[BotLifecycle] Spectator handling and fixed 5-second timer skipped for Practice bot {}.",
+				DeathBotEntry.BotId);
 		}
 		else if (Fortnite_Version < 6) // Spectating (is this the actual build or is it like 6.10 when they added it auto).
 		{
@@ -1719,6 +1725,8 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 					static auto PlayerToSpectateOnDeathOffset = PlayerController->GetOffset("PlayerToSpectateOnDeath");
 					PlayerController->Get<APawn*>(PlayerToSpectateOnDeathOffset) = KillerPawn;
 
+					Bots::LogDeathTimerRegistration(PlayerController, DeadPawn, DeadPlayerState,
+						"SpectateOnDeath", 5.f);
 					UKismetSystemLibrary::K2_SetTimer(PlayerController, L"SpectateOnDeath", 5.f, false); // Soo proper its scary
 				}
 			}
@@ -1780,7 +1788,12 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 	{
 		// Practice controllers have no client connection to spectate through.
 		// Calling the legacy client death handler can schedule repeated controller
-		// transitions/timers, so the registry-owned path ends here.
+		// transitions/timers, so the registry-owned path ends here. Repeat the
+		// cancellation after death-info/ability finalization in case either
+		// subsystem registered work during this hook. Callback guards remain the
+		// final defense for timers the surrounding engine function schedules
+		// after this call-site hook returns.
+		Bots::CancelBotOwnedDeathTimers(DeathBotEntry.BotId, "Practice death finalization");
 		LOG_INFO(LogBots, "[BotLifecycle] Legacy ClientOnPawnDied handler skipped for Practice bot {}.",
 			DeathBotEntry.BotId);
 		return;

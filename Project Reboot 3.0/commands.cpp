@@ -981,10 +981,15 @@ void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 
 			LOG_INFO(LogBots, "[BotStress] Stress test requested {} spawns and {} kills; spawned={}.",
 				Count, KillRequests, SpawnedBotIds.size());
+			Bots::BeginBotStressTestWatchdog(Count, KillRequests, SpawnedBotIds);
 			SendMessageToConsole(PlayerController,
 				(L"Bot stress test: spawned " + std::to_wstring(SpawnedBotIds.size()) +
 					L" Practice bots and requested " + std::to_wstring(KillRequests) +
-					L" kills. Use botlist to inspect the dead entries.").c_str());
+					L" kills. Wait 15 seconds, then run botstressstatus.").c_str());
+		}
+		else if (Command == "botstressstatus")
+		{
+			SendMessageToConsole(PlayerController, Bots::ProbeBotStressTestStatus().c_str());
 		}
 		else if (Command == "botinfo")
 		{
@@ -1295,6 +1300,7 @@ cheat waypoint (saved phrase/number) - Teleports the player to the selected exis
 cheat spawnbot [count=1] [participant|practice] - Spawns tracked player bots. Defaults to Participant.
 cheat botlist - Lists registered bot IDs, types, states, names, and reference validity.
 cheat botstresstest [count=10] - Spawns and force-kills at least 10 Practice bots for lifecycle testing.
+cheat botstressstatus - After 15 seconds, verifies network tick, command, and registry liveness.
 cheat botinfo <id> - Shows detailed registry and lifecycle information.
 cheat despawnbot <id> - Safely removes exactly one registered bot.
 cheat despawnallbots - Safely removes all registered bots.

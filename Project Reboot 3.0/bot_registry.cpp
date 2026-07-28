@@ -7,6 +7,7 @@
 #include "FortPlayerControllerAthena.h"
 #include "FortPlayerPawnAthena.h"
 #include "FortPlayerStateAthena.h"
+#include "KismetSystemLibrary.h"
 #include "World.h"
 #include "reboot.h"
 
@@ -29,6 +30,15 @@ FSafeBotObjectReference FSafeBotObjectReference::Capture(UObject* InObject)
 	Result.ObjectIndex = InObject->InternalIndex;
 	Result.ObjectSerialNumber = Item->SerialNumber;
 	return Result;
+}
+
+bool FSafeBotObjectReference::Matches(UObject* Candidate) const
+{
+	if (!Candidate || !Object || Candidate != Object || ObjectIndex < 0)
+		return false;
+
+	auto Item = GetItemByIndex(ObjectIndex);
+	return Item && Item->Object == Candidate && Item->SerialNumber == ObjectSerialNumber;
 }
 
 void FSafeBotObjectReference::Reset()
@@ -125,6 +135,22 @@ std::optional<FPlayerBotRegistryEntry> FPlayerBotRegistry::FindByPawn(APawn* Paw
 {
 	auto It = FindPawnIterator(Pawn);
 	return It == Entries.end() ? std::nullopt : std::optional<FPlayerBotRegistryEntry>(*It);
+}
+
+std::optional<uint64> FPlayerBotRegistry::FindStableBotIdByController(AController* Controller)
+{
+	auto It = FindControllerIterator(Controller);
+
+	if (It != Entries.end())
+		return It->BotId;
+
+	for (const auto& RetiredController : RetiredControllerIds)
+	{
+		if (RetiredController.second.Matches(Controller))
+			return RetiredController.first;
+	}
+
+	return std::nullopt;
 }
 
 std::vector<FPlayerBotRegistryEntry> FPlayerBotRegistry::GetBots()
@@ -242,6 +268,7 @@ bool FPlayerBotRegistry::RemoveEntry(uint64 BotId)
 		return false;
 
 	It->State = EPlayerBotLifecycleState::Removed;
+	RetiredControllerIds.push_back({ BotId, It->Controller });
 	It->Controller.Reset();
 	It->Pawn.Reset();
 	It->PlayerState.Reset();
@@ -300,6 +327,7 @@ void FPlayerBotRegistry::InvalidateAndClear(const char* Reason, bool bLog)
 	for (auto& Entry : Entries)
 	{
 		Entry.State = EPlayerBotLifecycleState::Removed;
+		RetiredControllerIds.push_back({ Entry.BotId, Entry.Controller });
 		Entry.Controller.Reset();
 		Entry.Pawn.Reset();
 		Entry.PlayerState.Reset();
@@ -486,6 +514,139 @@ namespace Bots
 		GetRegistry().MarkAliveTrackingRemoved(Controller);
 	}
 
+	void LogDeathTimerRegistration(AController* Controller, APawn* Pawn, UObject* PlayerState,
+		const char* CallbackName, float DelaySeconds)
+	{
+		const auto BotId = GetRegistry().FindStableBotIdByController(Controller);
+		LOG_INFO(LogBots,
+			"[BotLifecycle] Timer registration bot={} callback={} delay={:.2f}s controllerValid={} pawnValid={} playerStateValid={}.",
+			BotId.value_or(0), CallbackName, DelaySeconds,
+			Controller && Controller->IsValidLowLevel(),
+			Pawn && Pawn->IsValidLowLevel(),
+			PlayerState && PlayerState->IsValidLowLevel());
+	}
+
+	bool CancelBotOwnedDeathTimers(uint64 BotId, const char* Reason)
+	{
+		auto Entry = GetRegistry().GetBot(BotId);
+
+		if (!Entry)
+		{
+			LOG_WARN(LogBots, "[BotLifecycle] Timer cancellation skipped for bot {} because the registry entry no longer exists.",
+				BotId);
+			return GetRegistry().WasRemoved(BotId);
+		}
+
+		auto Controller = Entry->Controller.Resolve<AController>();
+		auto Pawn = Entry->Pawn.Resolve<APawn>();
+		auto PlayerState = Entry->PlayerState.Resolve<UObject>();
+
+		LOG_INFO(LogBots,
+			"[BotLifecycle] Timer cancellation begin bot={} reason={} controllerValid={} pawnValid={} playerStateValid={}.",
+			BotId, Reason, Controller != nullptr, Pawn != nullptr, PlayerState != nullptr);
+
+		struct FTimerToCancel
+		{
+			UObject* Target;
+			const wchar_t* FunctionName;
+			const char* CallbackName;
+		};
+
+		const FTimerToCancel Timers[] = {
+			{ Controller, L"SpectateOnDeath", "SpectateOnDeath" },
+			{ Controller, L"RespawnPlayerAfterDeath", "RespawnPlayerAfterDeath" },
+			{ Controller, L"ServerRestartPlayer", "ServerRestartPlayer" },
+			{ Controller, L"RestartPlayer", "RestartPlayer" },
+			{ Pawn, L"K2_DestroyActor", "K2_DestroyActor" },
+			{ Pawn, L"Destroy", "Destroy" },
+			{ PlayerState, L"RespawnPlayer", "RespawnPlayer" },
+			{ PlayerState, L"RestartPlayer", "RestartPlayer" },
+		};
+
+		for (const auto& Timer : Timers)
+		{
+			if (!Timer.Target)
+			{
+				LOG_INFO(LogBots,
+					"[BotLifecycle] Timer cancellation bot={} callback={} targetValid=false active=false remaining=-1.00s cleared=false.",
+					BotId, Timer.CallbackName);
+				continue;
+			}
+
+			const bool bWasActive = UKismetSystemLibrary::K2_IsTimerActive(Timer.Target, Timer.FunctionName);
+			const float Remaining = bWasActive
+				? UKismetSystemLibrary::K2_GetTimerRemainingTime(Timer.Target, Timer.FunctionName)
+				: -1.f;
+			const bool bClearCalled = UKismetSystemLibrary::K2_ClearTimer(Timer.Target, Timer.FunctionName);
+			const bool bStillActive = UKismetSystemLibrary::K2_IsTimerActive(Timer.Target, Timer.FunctionName);
+
+			LOG_INFO(LogBots,
+				"[BotLifecycle] Timer cancellation bot={} callback={} targetValid=true active={} remaining={:.2f}s cleared={} stillActive={}.",
+				BotId, Timer.CallbackName, bWasActive, Remaining, bClearCalled, bStillActive);
+		}
+
+		// AActor lifespan uses an internal timer rather than K2_SetTimer. Zero
+		// lifespan cancels that delayed destruction without retaining a raw pawn
+		// or controller pointer in our lifecycle system.
+		if (Pawn)
+		{
+			const bool bCancelled = Pawn->SetLifeSpan(0.f);
+			LOG_INFO(LogBots, "[BotLifecycle] Delayed pawn destruction cancellation bot={} SetLifeSpanAvailable={}.",
+				BotId, bCancelled);
+		}
+
+		if (Controller)
+		{
+			const bool bCancelled = Controller->SetLifeSpan(0.f);
+			LOG_INFO(LogBots, "[BotLifecycle] Delayed controller destruction cancellation bot={} SetLifeSpanAvailable={}.",
+				BotId, bCancelled);
+		}
+
+		LOG_INFO(LogBots, "[BotLifecycle] Timer cancellation end bot={} reason={}.", BotId, Reason);
+		return true;
+	}
+
+	bool ShouldSuppressDelayedDeathCallback(AController* Controller, const char* CallbackName,
+		uint64* OutBotId)
+	{
+		const auto StableBotId = GetRegistry().FindStableBotIdByController(Controller);
+		const uint64 BotId = StableBotId.value_or(0);
+
+		if (OutBotId)
+			*OutBotId = BotId;
+
+		if (!StableBotId)
+		{
+			LOG_INFO(LogBots,
+				"[BotLifecycle] Callback entry bot=0 callback={} tracked=false controllerValid={}; continuing normal player path.",
+				CallbackName, Controller && Controller->IsValidLowLevel());
+			return false;
+		}
+
+		auto Entry = GetRegistry().GetBot(BotId);
+
+		if (!Entry)
+		{
+			LOG_WARN(LogBots,
+				"[BotLifecycle] Callback entry bot={} callback={} registryEntry=false; suppressing post-cleanup callback.",
+				BotId, CallbackName);
+			return true;
+		}
+
+		LOG_INFO(LogBots,
+			"[BotLifecycle] Callback entry bot={} callback={} type={} state={} controllerValid={} pawnValid={} playerStateValid={}.",
+			BotId, CallbackName, BotTypeToString(Entry->Type), BotStateToString(Entry->State),
+			Entry->Controller.IsValid(), Entry->Pawn.IsValid(), Entry->PlayerState.IsValid());
+
+		return Entry->Type == EPlayerBotType::Practice;
+	}
+
+	void LogDelayedDeathCallbackExit(uint64 BotId, const char* CallbackName, bool bSuppressed)
+	{
+		LOG_INFO(LogBots, "[BotLifecycle] Callback exit bot={} callback={} suppressed={}.",
+			BotId, CallbackName, bSuppressed);
+	}
+
 	bool CleanupRegisteredBot(uint64 BotId, const char* Reason, bool bDestroyActors)
 	{
 		LOG_INFO(LogBots, "[BotLifecycle] Cleanup request received for bot {} reason={}.", BotId, Reason);
@@ -520,6 +681,10 @@ namespace Bots
 
 		LOG_INFO(LogBots, "[BotLifecycle] Cleanup registry lookup succeeded for bot {} type={} state={}.",
 			BotId, BotTypeToString(Entry->Type), BotStateToString(Entry->State));
+
+		// Cancel timers while registry-owned weak references still resolve and
+		// before possession or actor lifetime is changed.
+		CancelBotOwnedDeathTimers(BotId, Reason);
 
 		if (Entry->bCountedAsAliveParticipant)
 			RemoveParticipantTrackingForManualDespawn(*Entry);

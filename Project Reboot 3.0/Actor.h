@@ -32,6 +32,7 @@ public:
 	struct FVector GetActorRightVector();
 	struct FVector GetActorUpVector();
 	void K2_DestroyActor();
+	bool SetLifeSpan(float InLifespan);
 	class UActorComponent* GetComponentByClass(class UClass* ComponentClass);
 	float GetDistanceTo(AActor* OtherActor);
 	struct FRotator GetActorRotation();
