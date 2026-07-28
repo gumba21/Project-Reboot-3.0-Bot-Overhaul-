@@ -195,6 +195,7 @@
     <ClCompile Include="BuildingStructuralSupportSystem.cpp" />
     <ClCompile Include="BuildingTrap.cpp" />
     <ClCompile Include="BuildingWeapons.cpp" />
+    <ClCompile Include="bot_registry.cpp" />
     <ClCompile Include="calendar.h" />
     <ClCompile Include="CheatManager.cpp" />
     <ClCompile Include="Class.cpp" />
@@ -302,6 +303,7 @@
     <ClInclude Include="BinaryHeap.h" />
     <ClInclude Include="BitArray.h" />
     <ClInclude Include="botnames.h" />
+    <ClInclude Include="bot_registry.h" />
     <ClInclude Include="bots.h" />
     <ClInclude Include="BP_IslandScripting.h" />
     <ClInclude Include="BuildingActor.h" />

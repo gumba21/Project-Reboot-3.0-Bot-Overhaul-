@@ -29,6 +29,7 @@
 #include "Vector.h"
 #include "reboot.h"
 #include "botnames.h"
+#include "bots.h"
 #include "FortGameModeAthena.h"
 #include "UnrealString.h"
 #include "KismetTextLibrary.h"
@@ -121,6 +122,7 @@ static inline bool HasAnyCalendarModification()
 
 static inline void Restart() // todo move?
 {
+	Bots::HandleMatchReset("restart requested");
 	InitBotNames();
 
 	FString LevelA = Engine_Version < 424

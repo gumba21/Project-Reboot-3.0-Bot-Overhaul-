@@ -7,6 +7,25 @@
 
 std::map<std::string, FVector> Waypoints;
 
+namespace
+{
+	std::wstring WidenBotText(const std::string& Value)
+	{
+		return std::wstring(Value.begin(), Value.end());
+	}
+
+	std::wstring FormatBotSummary(const FPlayerBotRegistryEntry& Entry)
+	{
+		return L"#" + std::to_wstring(Entry.BotId) +
+			L" type=" + WidenBotText(Bots::BotTypeToString(Entry.Type)) +
+			L" state=" + WidenBotText(Bots::BotStateToString(Entry.State)) +
+			L" name=" + WidenBotText(Entry.DisplayName) +
+			L" refs[C=" + std::to_wstring(Entry.Controller.IsValid()) +
+			L" P=" + std::to_wstring(Entry.Pawn.IsValid()) +
+			L" PS=" + std::to_wstring(Entry.PlayerState.IsValid()) + L"]";
+	}
+}
+
 void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 {
 	bool isMsgEmpty = !Msg.Data.Data || Msg.Data.Num() <= 0;
@@ -19,6 +38,8 @@ void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 
 	if (!PlayerState || !IsOperator(PlayerState, PlayerController))
 		return;
+
+	Bots::SweepInvalidBots();
 
 	std::vector<std::string> Arguments;
 	std::string OldMsg = "";
@@ -775,11 +796,51 @@ void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 			}
 
 			int Count = 1;
+			EPlayerBotType Type = EPlayerBotType::Participant;
+			size_t NextArgument = 1;
 
-			if (Arguments.size() >= 2)
+			if (Arguments.size() > NextArgument)
 			{
-				try { Count = std::stod(Arguments[1]); }
-				catch (...) {}
+				if (Bots::TryParseBotType(Arguments[NextArgument], Type))
+				{
+					++NextArgument;
+				}
+				else
+				{
+					try
+					{
+						Count = std::stoi(Arguments[NextArgument]);
+						++NextArgument;
+					}
+					catch (...)
+					{
+						SendMessageToConsole(PlayerController, L"Usage: spawnbot [count] [participant|practice]");
+						return;
+					}
+				}
+			}
+
+			if (Arguments.size() > NextArgument)
+			{
+				if (!Bots::TryParseBotType(Arguments[NextArgument], Type))
+				{
+					SendMessageToConsole(PlayerController, L"Bot type must be participant or practice.");
+					return;
+				}
+
+				++NextArgument;
+			}
+
+			if (Arguments.size() > NextArgument)
+			{
+				SendMessageToConsole(PlayerController, L"Usage: spawnbot [count] [participant|practice]");
+				return;
+			}
+
+			if (Count < 1)
+			{
+				SendMessageToConsole(PlayerController, L"Bot count must be at least 1.");
+				return;
 			}
 
 			constexpr int Max = 99;
@@ -804,20 +865,111 @@ void ServerCheatHook(AFortPlayerControllerAthena* PlayerController, FString Msg)
 				Transform.Translation = Loc;
 				Transform.Scale3D = FVector(1, 1, 1);
 
-				auto NewActor = Bots::SpawnBot(Transform, Pawn);
+				auto SpawnResult = Bots::SpawnBotDetailed(Transform, Pawn, Type);
 
-				if (!NewActor)
+				if (!SpawnResult)
 				{
-					SendMessageToConsole(PlayerController, L"Failed to spawn an actor!");
+					SendMessageToConsole(PlayerController, L"Failed to spawn bot; see [BotLifecycle] logs.");
 				}
 				else
 				{
 					AmountSpawned++;
+					SendMessageToConsole(PlayerController,
+						(L"Spawned bot #" + std::to_wstring(SpawnResult.BotId) +
+							L" as " + WidenBotText(Bots::BotTypeToString(Type)) + L".").c_str());
 				}
 			}
 
 			if (AmountSpawned > 0)
-				SendMessageToConsole(PlayerController, L"Summoned!");
+				SendMessageToConsole(PlayerController,
+					(L"Spawned " + std::to_wstring(AmountSpawned) + L" bot(s).").c_str());
+		}
+		else if (Command == "botlist")
+		{
+			const auto Entries = Bots::GetRegistry().GetBots();
+			int AliveCount = 0;
+			int DeadCount = 0;
+			int ParticipantCount = 0;
+			int PracticeCount = 0;
+
+			for (const auto& Entry : Entries)
+			{
+				AliveCount += Entry.State == EPlayerBotLifecycleState::Alive;
+				DeadCount += Entry.State == EPlayerBotLifecycleState::Dead;
+				ParticipantCount += Entry.Type == EPlayerBotType::Participant;
+				PracticeCount += Entry.Type == EPlayerBotType::Practice;
+			}
+
+			SendMessageToConsole(PlayerController,
+				(L"Bots: total=" + std::to_wstring(Entries.size()) +
+					L" alive=" + std::to_wstring(AliveCount) +
+					L" dead=" + std::to_wstring(DeadCount) +
+					L" participant=" + std::to_wstring(ParticipantCount) +
+					L" practice=" + std::to_wstring(PracticeCount) + L".").c_str());
+
+			for (const auto& Entry : Entries)
+				SendMessageToConsole(PlayerController, FormatBotSummary(Entry).c_str());
+		}
+		else if (Command == "botinfo")
+		{
+			if (NumArgs < 1)
+			{
+				SendMessageToConsole(PlayerController, L"Usage: botinfo <id>");
+				return;
+			}
+
+			uint64 BotId = 0;
+
+			try { BotId = std::stoull(Arguments[1]); }
+			catch (...)
+			{
+				SendMessageToConsole(PlayerController, L"Bot ID must be a positive number.");
+				return;
+			}
+
+			auto Entry = Bots::GetRegistry().GetBot(BotId);
+
+			if (!Entry)
+			{
+				SendMessageToConsole(PlayerController, (L"No registered bot with ID " + std::to_wstring(BotId) + L".").c_str());
+				return;
+			}
+
+			SendMessageToConsole(PlayerController, FormatBotSummary(*Entry).c_str());
+			SendMessageToConsole(PlayerController,
+				(L"age=" + std::to_wstring(Entry->GetSpawnAgeSeconds()) +
+					L"s aliveTracking=" + std::to_wstring(Entry->bCountedAsAliveParticipant) +
+					L" pendingCleanup=" + std::to_wstring(Entry->State == EPlayerBotLifecycleState::PendingCleanup) +
+					L" removed=" + std::to_wstring(Entry->State == EPlayerBotLifecycleState::Removed) +
+					L" inventoryValid=" + std::to_wstring(Entry->Inventory.IsValid()) + L".").c_str());
+		}
+		else if (Command == "despawnbot")
+		{
+			if (NumArgs < 1)
+			{
+				SendMessageToConsole(PlayerController, L"Usage: despawnbot <id>");
+				return;
+			}
+
+			uint64 BotId = 0;
+
+			try { BotId = std::stoull(Arguments[1]); }
+			catch (...)
+			{
+				SendMessageToConsole(PlayerController, L"Bot ID must be a positive number.");
+				return;
+			}
+
+			if (Bots::DespawnBot(BotId))
+				SendMessageToConsole(PlayerController, (L"Despawned bot #" + std::to_wstring(BotId) + L".").c_str());
+			else
+				SendMessageToConsole(PlayerController, (L"No registered bot with ID " + std::to_wstring(BotId) + L".").c_str());
+		}
+		else if (Command == "despawnallbots")
+		{
+			const int RemovedCount = Bots::DespawnAllBots();
+			SendMessageToConsole(PlayerController,
+				(L"Despawned " + std::to_wstring(RemovedCount) + L" bot(s).").c_str());
 		}
 		else if (Command == "sethealth")
 		{
@@ -1062,7 +1214,11 @@ cheat spawnpickup <ShortWID> <ItemCount=1> <PickupCount=1> - Spawns a pickup at 
 cheat teleport/tp - Teleports to what the player is looking at.
 cheat savewaypoint (phrase/number) - Gets the location of where you are standing and saves it as a waypoint.
 cheat waypoint (saved phrase/number) - Teleports the player to the selected existing waypoint.
-cheat spawnbot <Amount=1> - Spawns a bot at the player (experimental).
+cheat spawnbot [count=1] [participant|practice] - Spawns tracked player bots. Defaults to Participant.
+cheat botlist - Lists registered bot IDs, types, states, names, and reference validity.
+cheat botinfo <id> - Shows detailed registry and lifecycle information.
+cheat despawnbot <id> - Safely removes exactly one registered bot.
+cheat despawnallbots - Safely removes all registered bots.
 cheat setpickaxe <PickaxeID> - Set player's pickaxe. Can be either the PID or WID
 cheat destroytarget - Destroys the actor that the player is looking at.
 cheat wipequickbar <Primary|Secondary> <RemoveUndroppables=false> - Wipes the specified quickbar (parameters is not case sensitive).

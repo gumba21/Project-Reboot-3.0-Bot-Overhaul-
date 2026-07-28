@@ -1859,9 +1859,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved)
         CreateThread(0, 0, Main, 0, 0, 0);
         break;
     case DLL_PROCESS_DETACH:
+        // Do not call ProcessEvent or destroy actors while the loader lock is
+        // held. Drop all registry references so an unloaded DLL cannot retain
+        // stale UObject addresses.
+        Bots::Shutdown(false);
         break;
     }
 
     return TRUE;
 }
-

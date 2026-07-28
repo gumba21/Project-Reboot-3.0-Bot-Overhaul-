@@ -24,6 +24,7 @@
 #include "gui.h"
 #include "FortAthenaMutator_InventoryOverride.h"
 #include "FortAthenaMutator_TDM.h"
+#include "bot_registry.h"
 
 void AFortPlayerController::ClientReportDamagedResourceBuilding(ABuildingSMActor* BuildingSMActor, EFortResourceType PotentialResourceType, int PotentialResourceCount, bool bDestroyed, bool bJustHitWeakspot)
 {
@@ -1565,6 +1566,8 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 
 		if (!DeadPawn->IsDBNO())
 		{
+			Bots::GetRegistry().MarkDead(PlayerController, DeadPawn);
+
 			if (bHandleDeath)
 			{
 				if (Fortnite_Version > 1.8 || Fortnite_Version == 1.11)
@@ -1591,7 +1594,20 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 						}
 					}
 
-					RemoveFromAlivePlayers(GameMode, PlayerController, KillerPlayerState == DeadPlayerState ? nullptr : KillerPlayerState, KillerPawn, KillerWeaponDef, DeathCause, 0);
+					if (Bots::ShouldRemoveFromAlivePlayersOnDeath(PlayerController))
+					{
+						// Participant bots and human players retain the original
+						// engine removal path and normal victory behavior.
+						RemoveFromAlivePlayers(GameMode, PlayerController, KillerPlayerState == DeadPlayerState ? nullptr : KillerPlayerState, KillerPawn, KillerWeaponDef, DeathCause, 0);
+						Bots::NotifyAlivePlayerTrackingRemoved(PlayerController);
+					}
+					else
+					{
+						// Fortnite 4.5 practice bots were never inserted into
+						// PlayersLeft/AlivePlayers, so invoking this function for
+						// them would incorrectly decrement the real match count.
+						LOG_INFO(LogBots, "[BotLifecycle] Practice bot death excluded from RemoveFromAlivePlayers.");
+					}
 
 					/*
 
@@ -1682,11 +1698,6 @@ void AFortPlayerController::ClientOnPawnDiedHook(AFortPlayerController* PlayerCo
 				}
 			}
 		}
-	}
-
-	if (DeadPlayerState->IsBot())
-	{
-		// AllPlayerBotsToTick.remov3lbah
 	}
 
 	DeadPlayerState->EndDBNOAbilities();

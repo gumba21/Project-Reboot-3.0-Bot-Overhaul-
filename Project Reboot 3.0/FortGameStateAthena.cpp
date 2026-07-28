@@ -314,6 +314,9 @@ void AFortGameStateAthena::OnRep_GamePhase()
 
 	static auto OnRep_GamePhase = FindObject<UFunction>(L"/Script/FortniteGame.FortGameStateAthena.OnRep_GamePhase");
 	this->ProcessEvent(OnRep_GamePhase, &OldGamePhase);
+
+	if (GetGamePhase() == EAthenaGamePhase::EndGame && Bots::GetRegistry().Num() > 0)
+		Bots::HandleMatchReset("match ended");
 }
 
 void AFortGameStateAthena::OnRep_CurrentPlaylistInfo()

@@ -42,6 +42,10 @@ void UNetDriver::RemoveNetworkActor(AActor* Actor)
 
 void UNetDriver::TickFlushHook(UNetDriver* NetDriver)
 {
+	// Lifecycle validation stays active even while behavior ticking is disabled.
+	// It only logs and cleans when a tracked UObject becomes invalid.
+	Bots::SweepInvalidBots();
+
 	if (bShouldDestroyAllPlayerBuilds) // i hate this
 	{
 		auto AllBuildingSMActors = UGameplayStatics::GetAllActorsOfClass(GetWorld(), ABuildingSMActor::StaticClass());
